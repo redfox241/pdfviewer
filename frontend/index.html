@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF Viewer</title>
+  </head>
+  <body data-platform="web">
+    <svg class="sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-folder" viewBox="0 0 24 24">
+        <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z" />
+      </symbol>
+      <symbol id="i-file" viewBox="0 0 24 24">
+        <path d="M6 3.5h7l5 5V20a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" />
+        <path d="M13 3.5v5h5" />
+      </symbol>
+      <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6" /></symbol>
+      <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6" /></symbol>
+      <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" /></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></symbol>
+      <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" /></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24">
+        <circle cx="10.5" cy="10.5" r="6.5" />
+        <path d="M15.5 15.5L20 20" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path d="M20 14.2A8.2 8.2 0 0 1 9.8 4 8.2 8.2 0 1 0 20 14.2z" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4" />
+      </symbol>
+      <symbol id="i-panel" viewBox="0 0 24 24">
+        <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+        <path d="M9 4.5v15" />
+      </symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.6.66 1.04 1.27 1.04H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51.96z" />
+      </symbol>
+      <symbol id="i-rotate" viewBox="0 0 24 24">
+        <path d="M20 8.5A8 8 0 1 0 20.4 14" />
+        <path d="M20 4v5h-5" />
+      </symbol>
+      <symbol id="i-cursor" viewBox="0 0 24 24">
+        <path d="M5.5 3.8l13 7.2-5.6 1.7-2.2 5.5z" />
+      </symbol>
+      <symbol id="i-highlighter" viewBox="0 0 24 24">
+        <path d="M9.5 14.5L14 10l4.5 2.2-5.8 5.8z" />
+        <path d="M8.2 15.8l-2.6 2.6a1.6 1.6 0 0 0 0 2.3l.7.7a1.6 1.6 0 0 0 2.3 0l2.6-2.6" />
+        <path d="M15.5 8.5l2-2a1.6 1.6 0 0 1 2.3 0l1.2 1.2a1.6 1.6 0 0 1 0 2.3l-2 2" />
+      </symbol>
+      <symbol id="i-pen" viewBox="0 0 24 24">
+        <path d="M4 20l1-4.2L16.4 4.4a1.8 1.8 0 0 1 2.5 0l.7.7a1.8 1.8 0 0 1 0 2.5L8.2 19z" />
+        <path d="M14.5 6.3l3.2 3.2" />
+      </symbol>
+      <symbol id="i-eraser" viewBox="0 0 24 24">
+        <path d="M4.6 14.3l8.8-8.8a2 2 0 0 1 2.8 0l1.8 1.8a2 2 0 0 1 0 2.8l-6.3 6.3H7z" />
+        <path d="M8.2 19.5h12" />
+      </symbol>
+      <symbol id="i-box" viewBox="0 0 24 24">
+        <rect x="4" y="5.5" width="16" height="13" rx="1.5" stroke-dasharray="3 2.5" />
+      </symbol>
+      <symbol id="i-note" viewBox="0 0 24 24">
+        <path d="M5 4.5h14v10l-5 5H5z" />
+        <path d="M14 19.5v-5h5" />
+      </symbol>
+      <symbol id="i-underline" viewBox="0 0 24 24">
+        <path d="M7 4.5v6a5 5 0 0 0 10 0v-6" />
+        <path d="M5.5 20h13" />
+      </symbol>
+      <symbol id="i-strike" viewBox="0 0 24 24">
+        <path d="M8 6.5c1-1.2 2.4-1.8 4.2-1.8 2.6 0 4.3 1.2 4.6 3" />
+        <path d="M6.5 17.2c1 1.3 2.6 2 4.6 2 2.8 0 4.6-1.3 4.8-3.2" />
+        <path d="M4.5 12h15" />
+      </symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24">
+        <rect x="8.5" y="8.5" width="11" height="11" rx="2" />
+        <path d="M15.5 8.5v-2a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" />
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24">
+        <path d="M4.5 7h15M9 7V4.8h6V7M6.5 7l.8 12.2a1 1 0 0 0 1 .8h7.4a1 1 0 0 0 1-.8L17.5 7" />
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M4.5 12.5l5 5 10-11" /></symbol>
+      <symbol id="i-fit-width" viewBox="0 0 24 24">
+        <path d="M3.5 6.5v11M20.5 6.5v11M7 9.5L4 12l3 2.5M17 9.5l3 2.5-3 2.5" />
+        <path d="M8 12h8" />
+      </symbol>
+      <symbol id="i-fit-page" viewBox="0 0 24 24">
+        <rect x="6" y="3.5" width="12" height="17" rx="1.2" />
+        <path d="M9 8.5h6M9 12h6M9 15.5h4" />
+      </symbol>
+      <symbol id="i-logo" viewBox="0 0 24 24">
+        <path d="M6 2.8h7.5L19 8.3V21a.8.8 0 0 1-.8.8H6a.8.8 0 0 1-.8-.8V3.6a.8.8 0 0 1 .8-.8z" />
+        <path d="M13.5 2.8v5.5H19" />
+        <path d="M8.6 13.2h6.6M8.6 16.6h4.4" />
+      </symbol>
+    </svg>
+
+    <div id="app">
+      <header id="topbar" class="topbar">
+        <div class="topbar-left">
+          <button id="btn-open" class="tbtn" title="打开 PDF (⌘O)">
+            <svg class="icon"><use href="#i-folder" /></svg>
+            <span>打开</span>
+          </button>
+          <div id="doc-title" class="doc-title" title="">
+            <svg class="icon doc-icon"><use href="#i-file" /></svg>
+            <span id="doc-name">未打开文档</span>
+          </div>
+        </div>
+
+        <div class="topbar-center">
+          <div class="seg">
+            <button id="btn-prev" class="icon-btn" title="上一页 (PgUp)">
+              <svg class="icon"><use href="#i-chevron-left" /></svg>
+            </button>
+            <input id="page-input" class="page-input" inputmode="numeric" value="1" aria-label="页码" />
+            <span class="page-total">/ <b id="page-total">0</b></span>
+            <button id="btn-next" class="icon-btn" title="下一页 (PgDn)">
+              <svg class="icon"><use href="#i-chevron-right" /></svg>
+            </button>
+          </div>
+
+          <span class="divider"></span>
+
+          <div class="seg">
+            <button id="btn-zoom-out" class="icon-btn" title="缩小 (⌘-)">
+              <svg class="icon"><use href="#i-minus" /></svg>
+            </button>
+            <button id="btn-zoom" class="zoom-label" title="点击切换缩放模式">100%</button>
+            <button id="btn-zoom-in" class="icon-btn" title="放大 (⌘+)">
+              <svg class="icon"><use href="#i-plus" /></svg>
+            </button>
+            <button id="btn-fit" class="icon-btn" title="适合宽度 (⌘1)">
+              <svg class="icon"><use href="#i-fit-width" /></svg>
+            </button>
+            <button id="btn-rotate" class="icon-btn" title="旋转 90°">
+              <svg class="icon"><use href="#i-rotate" /></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="topbar-right">
+          <button id="btn-search" class="icon-btn" title="搜索 (⌘F)">
+            <svg class="icon"><use href="#i-search" /></svg>
+          </button>
+          <button id="btn-night" class="icon-btn" title="夜间模式">
+            <svg class="icon"><use href="#i-moon" /></svg>
+          </button>
+          <button id="btn-read" class="icon-btn" title="标记本页已读 (R)">
+            <svg class="icon"><use href="#i-check" /></svg>
+          </button>
+          <button id="btn-sidebar" class="icon-btn" title="侧栏">
+            <svg class="icon"><use href="#i-panel" /></svg>
+          </button>
+          <button id="btn-settings" class="icon-btn" title="设置">
+            <svg class="icon"><use href="#i-settings" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="progress-line"><i id="progress-fill"></i></div>
+
+      <div class="workspace">
+        <aside id="sidebar" class="sidebar collapsed">
+          <div class="sidebar-head">
+            <div class="tabs" role="tablist">
+              <button class="tab active" data-tab="thumbs" role="tab">缩略图</button>
+              <button class="tab" data-tab="outline" role="tab">大纲</button>
+              <button class="tab" data-tab="notes" role="tab">标注</button>
+            </div>
+            <button id="sidebar-close" class="icon-btn small" title="收起侧栏">
+              <svg class="icon"><use href="#i-close" /></svg>
+            </button>
+          </div>
+          <div id="sidebar-body" class="sidebar-body"></div>
+        </aside>
+
+        <div class="viewer-shell">
+          <main id="viewer" class="viewer" data-tool="select">
+            <div id="pages" class="pages"></div>
+          </main>
+
+          <div id="empty" class="empty">
+            <div class="empty-card">
+              <div class="empty-mark">
+                <svg class="icon"><use href="#i-logo" /></svg>
+              </div>
+              <h1>打开一本 PDF</h1>
+              <p>把文件拖到这里，或从最近阅读继续。</p>
+              <button id="btn-empty-open" class="primary-btn">选择文件</button>
+              <div class="recent-head"><span>最近阅读</span></div>
+              <div id="recent-list" class="recent-list"></div>
+            </div>
+          </div>
+
+          <div id="loading" class="loading hidden">
+            <span class="spinner"></span>
+            <span>正在打开…</span>
+          </div>
+
+          <div id="tool-palette" class="tool-palette hidden">
+            <button class="tool-btn" data-tool="select" title="选择 (V)">
+              <svg class="icon"><use href="#i-cursor" /></svg>
+            </button>
+            <button class="tool-btn" data-tool="highlight" title="高亮 (H)">
+              <svg class="icon"><use href="#i-highlighter" /></svg>
+            </button>
+            <button class="tool-btn" data-tool="underline" title="下划线 (U)">
+              <svg class="icon"><use href="#i-underline" /></svg>
+            </button>
+            <button class="tool-btn" data-tool="strikeout" title="删除线 (S)">
+              <svg class="icon"><use href="#i-strike" /></svg>
+            </button>
+            <button class="tool-btn" data-tool="ink" title="记号笔 (P)">
+              <svg class="icon"><use href="#i-pen" /></svg>
+            </button>
+            <button class="tool-btn" data-tool="redact" title="涂改带">
+              <svg class="icon redact-icon"><use href="#i-pen" /></svg>
+            </button>
+            <button class="tool-btn" data-tool="box" title="区域框选">
+              <svg class="icon"><use href="#i-box" /></svg>
+            </button>
+            <button class="tool-btn" data-tool="note" title="便签 (N)">
+              <svg class="icon"><use href="#i-note" /></svg>
+            </button>
+            <button class="tool-btn" data-tool="eraser" title="橡皮擦 (E)">
+              <svg class="icon"><use href="#i-eraser" /></svg>
+            </button>
+            <div class="palette-divider"></div>
+            <div id="palette-colors" class="palette-colors"></div>
+          </div>
+
+          <div id="zoom-badge" class="zoom-badge hidden">100%</div>
+
+          <div id="search-panel" class="search-panel hidden">
+            <div class="search-row">
+              <svg class="icon search-icon"><use href="#i-search" /></svg>
+              <input id="search-input" type="text" placeholder="在文档中搜索…" autocomplete="off" spellcheck="false" />
+              <span id="search-count" class="search-count"></span>
+              <button id="search-case" class="mini-btn" title="区分大小写">Aa</button>
+              <button id="search-prev" class="mini-btn" title="上一个 (Shift+Enter)">
+                <svg class="icon"><use href="#i-chevron-left" /></svg>
+              </button>
+              <button id="search-next" class="mini-btn" title="下一个 (Enter)">
+                <svg class="icon"><use href="#i-chevron-right" /></svg>
+              </button>
+              <button id="search-close" class="mini-btn" title="关闭 (Esc)">
+                <svg class="icon"><use href="#i-close" /></svg>
+              </button>
+            </div>
+            <div id="search-results" class="search-results"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast-host" class="toast-host"></div>
+    <div id="popover-host" class="popover-host"></div>
+    <div id="modal-host" class="modal-host"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+build/bin
+node_modules
+frontend/dist
+.DS_Store
+frontend/package.json.md5
+frontend/wailsjs
+frontend/public/cmaps
+frontend/public/standard_fonts
+frontend/public/wasm
+frontend/public/iccs
+frontend/public/image_decoders
+frontend/public/pdf.worker.min.mjs

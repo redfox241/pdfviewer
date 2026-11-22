@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "pdfviewer",
+  "outputfilename": "PDF Viewer",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "tech-solution"
+  },
+  "info": {
+    "companyName": "tech-solution",
+    "productName": "PDF Viewer",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright © 2026",
+    "comments": "Local-first PDF reader built with Go, Wails and pdf.js"
+  }
+}
