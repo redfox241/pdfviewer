@@ -131,6 +131,16 @@ func (a *App) Version() string {
 	return appVersion
 }
 
+// ToggleMaximise switches the main window between zoomed and normal size.
+// The frontend calls this when the window chrome is double-clicked, since
+// Wails' CSS drag regions do not inherit the native title bar behaviour.
+func (a *App) ToggleMaximise() {
+	if a.ctx == nil {
+		return
+	}
+	wruntime.WindowToggleMaximise(a.ctx)
+}
+
 // StartupDocument is the PDF passed on the command line, if any.
 func (a *App) StartupDocument() string {
 	a.logf("startup document requested: %q", a.startupFile)

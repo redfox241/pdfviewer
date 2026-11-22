@@ -33,6 +33,7 @@ export const api = {
   startupDocument: () => call<string>("StartupDocument"),
   startupWarnings: () => call<string[]>("StartupWarnings"),
   platform: () => call<string>("Platform"),
+  toggleMaximise: () => call<void>("ToggleMaximise"),
   configDir: () => call<string>("ConfigDir"),
   reveal: (path: string) => call<void>("RevealFile", path),
   version: () => call<string>("Version"),

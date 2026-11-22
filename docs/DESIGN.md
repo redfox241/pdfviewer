@@ -351,6 +351,8 @@ pdfviewer/
 │       ├── state/             # 轻量 store（订阅式）
 │       └── styles/
 ├── build/                     # 图标、Info.plist、NSIS 配置
+├── scripts/                   # build.sh（macOS/Linux）与 build.ps1（Windows）
+├── Makefile                   # make mac / win / all 等快捷命令
 └── docs/DESIGN.md
 ```
 
@@ -360,9 +362,12 @@ pdfviewer/
 
 | 场景 | 命令 |
 |------|------|
-| 开发热重载 | `wails dev` |
-| macOS 通用包 | `wails build -platform darwin/universal` → `.app` |
-| Windows 安装包 | `wails build -platform windows/amd64 -nsis` → `.exe` |
+| 开发热重载 | `make dev` 或 `wails dev` |
+| macOS 通用包 | `make mac` 或 `wails build -platform darwin/universal` → `.app` |
+| Windows 可执行文件 | `make win` 或 `wails build -platform windows/amd64` → `.exe` |
+| Windows 安装包 | `make win-installer` 或 `wails build -platform windows/amd64 -nsis` |
+| macOS + Windows | `make all`（需要 macOS 主机） |
+| Windows（PowerShell） | `.\scripts\build.ps1 win` / `win-installer` |
 | CI | GitHub Actions 矩阵：macos-latest / windows-latest，产物上传 Release |
 
 - 签名：自用可 ad-hoc；分发需 Apple Developer ID + `notarytool` 公证，Windows 建议代码签名证书（可选）。

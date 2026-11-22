@@ -40,6 +40,8 @@
 │   ├── src/styles.css      # 界面样式
 │   └── scripts/            # 构建前复制 cMaps / 字体 / wasm
 ├── build/                  # 图标与打包配置
+├── scripts/                # 跨平台构建脚本（sh / PowerShell）
+├── Makefile                # make mac / win / all 等快捷命令
 └── docs/DESIGN.md
 ```
 
@@ -51,18 +53,60 @@
 # 安装 Wails CLI（国内网络可用 GOPROXY=https://goproxy.cn,direct）
 go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
-# 热重载开发
-wails dev
+# 确保 $(go env GOPATH)/bin 在 PATH 中，例如 macOS：
+export PATH="$HOME/go/bin:$PATH"
+```
 
-# 构建 macOS 通用包（Intel + Apple Silicon）
+### 一键构建（macOS / Linux）
+
+根目录提供 `Makefile` 和 `scripts/build.sh`，会自动查找 `wails`（PATH 或 `$(go env GOPATH)/bin`）。
+
+```bash
+make mac                 # macOS 通用包（Intel + Apple Silicon）
+make win                 # Windows x64 exe（可在 macOS 上交叉编译）
+make win-installer       # Windows x64 NSIS 安装包（需要 makensis）
+make all                 # macOS 通用包 + Windows x64
+
+make dev                 # 热重载开发
+make test                # go test ./...
+make doctor              # 检查构建环境
+make clean               # 删除 build/bin 和 frontend/dist
+
+make mac CLEAN=1         # 构建前执行 wails build -clean
+```
+
+也可以直接调用脚本：
+
+```bash
+./scripts/build.sh mac
+./scripts/build.sh win --clean
+```
+
+### 一键构建（Windows PowerShell）
+
+```powershell
+.\scripts\build.ps1 win
+.\scripts\build.ps1 win -Clean
+.\scripts\build.ps1 win-installer
+.\scripts\build.ps1 dev
+.\scripts\build.ps1 test
+
+# 如果被执行策略拦截：
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1 win
+```
+
+> macOS 包只能在 macOS 上构建；Windows 包可以在 macOS / Linux / Windows 上构建。
+> Windows 安装包需要 NSIS（`makensis`），参见 [Wails Windows Installer](https://wails.io/docs/guides/windows-installer/)。
+
+产物位于 `build/bin/`：macOS 为 `pdfviewer.app`，Windows 为 `PDF Viewer.exe`。
+
+如果不想用脚本，也可以直接调用 Wails CLI：
+
+```bash
 wails build -platform darwin/universal
-
-# 构建 Windows 可执行文件 / 安装包
 wails build -platform windows/amd64
 wails build -platform windows/amd64 -nsis
 ```
-
-产物位于 `build/bin/`：macOS 为 `pdfviewer.app`，Windows 为 `PDF Viewer.exe`。
 
 ## 使用
 

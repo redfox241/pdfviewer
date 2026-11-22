@@ -1140,6 +1140,17 @@ function toast(message: string, kind: "info" | "error" = "info"): void {
 // ---------------------------------------------------------------- wiring
 
 function wireUI(): void {
+  // Wails drag regions swallow the native title bar double-click, so toggle
+  // the window size ourselves. Skip controls that live inside the bar.
+  $("#topbar").addEventListener("dblclick", (e) => {
+    const target = e.target as HTMLElement | null;
+    if (!target || target.closest("button, input, select, textarea, a, [role='button']")) return;
+    e.preventDefault();
+    void api.toggleMaximise().catch((err) => {
+      void api.logError(`toggle maximise failed: ${errorText(err)}`);
+    });
+  });
+
   $("#btn-open").addEventListener("click", () => void openDialog());
   $("#btn-empty-open").addEventListener("click", () => void openDialog());
 
