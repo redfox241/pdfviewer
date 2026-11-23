@@ -16,6 +16,8 @@ import {
   uid,
 } from "./model";
 import { Viewer, type SearchResult, type SelectionPayload } from "./viewer";
+import { buildPrintPlan, exportSummary, planSummary, type PrintOptions } from "./printcore";
+import { runExport, runPrint, type PrintContext, type PrintToast } from "./print";
 
 function $<T extends HTMLElement>(selector: string): T {
   const el = document.querySelector(selector);
@@ -51,6 +53,7 @@ const popoverHost = $("#popover-host");
 const modalHost = $("#modal-host");
 const btnRead = $("#btn-read");
 const btnNight = $("#btn-night");
+const btnPrint = $<HTMLButtonElement>("#btn-print");
 
 let settings: Settings;
 let viewer: Viewer;
@@ -91,6 +94,10 @@ async function boot(): Promise<void> {
     highlightColor: "#ffd84d",
     nightMode: false,
     language: "zh",
+    printIncludeAnnotations: true,
+    printRangeMode: "all" as const,
+    printOnlyAnnotated: false,
+    printConfigured: true,
   }));
 
   selectionColor = settings.highlightColor;
@@ -160,6 +167,10 @@ function applyTheme(): void {
   document.documentElement.dataset.theme = resolved;
 }
 
+function updatePrintButton(): void {
+  btnPrint.disabled = !currentDoc || opening;
+}
+
 // ---------------------------------------------------------------- events
 
 function handleReady(pages: number): void {
@@ -169,6 +180,7 @@ function handleReady(pages: number): void {
   pageTotal.textContent = String(pages);
   updateProgress();
   updateReadButton();
+  updatePrintButton();
   if (!sidebar.classList.contains("collapsed")) void refreshSidebar();
   updatePageInput(viewer.getCurrentPage());
   handleZoomChange(viewer.getScale(), viewer.getZoomMode());
@@ -317,6 +329,7 @@ async function openInfo(info: DocInfo): Promise<void> {
     docTitle.title = "";
     emptyEl.classList.remove("hidden");
     palette.classList.add("hidden");
+    updatePrintButton();
     try {
       await api.closeDocument(info.token);
     } catch {
@@ -346,6 +359,7 @@ async function closeCurrent(save = true): Promise<void> {
   if (save) await flushSave();
   const doc = currentDoc;
   currentDoc = null;
+  updatePrintButton();
   try {
     await api.updateProgress(doc.token, viewer.getPages(), viewer.getProgress());
     await api.closeDocument(doc.token);
@@ -1880,6 +1894,139 @@ async function refreshRecent(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------- print
+
+function openPrintPanel(): void {
+  const doc = currentDoc;
+  if (!doc) {
+    toast("请先打开 PDF");
+    return;
+  }
+  const total = viewer.getPages();
+  if (!total) return;
+
+  const body = document.createElement("div");
+  body.className = "print-panel";
+  body.innerHTML = `
+    <div class="field">
+      <label>打印范围</label>
+      <div class="print-range-row">
+        <select data-k="rangeMode">
+          <option value="all">全部页面</option>
+          <option value="current">当前页</option>
+          <option value="custom">自定义</option>
+        </select>
+        <input type="text" data-k="rangeText" placeholder="如 1-3,5,8-10" autocomplete="off" spellcheck="false" />
+      </div>
+    </div>
+    <div class="field row">
+      <label>包含标注</label>
+      <input type="checkbox" data-k="annotations" />
+    </div>
+    <div class="field row">
+      <label>仅打印有标注的页</label>
+      <input type="checkbox" data-k="only" />
+    </div>
+    <p class="print-summary" data-k="print-summary"></p>
+    <p class="print-summary muted" data-k="export-summary"></p>
+    <p class="print-hint">导出始终包含全部页面；标注以矢量叠加，正文仍可选中、搜索。${
+      doc.size > 100 * 1024 * 1024 ? " 当前文件较大，生成时需要整份载入内存。" : ""
+    }</p>
+  `;
+
+  const modeSel = body.querySelector<HTMLSelectElement>('[data-k="rangeMode"]')!;
+  const rangeInput = body.querySelector<HTMLInputElement>('[data-k="rangeText"]')!;
+  const annotationsBox = body.querySelector<HTMLInputElement>('[data-k="annotations"]')!;
+  const onlyBox = body.querySelector<HTMLInputElement>('[data-k="only"]')!;
+  const printSummary = body.querySelector<HTMLElement>('[data-k="print-summary"]')!;
+  const exportLine = body.querySelector<HTMLElement>('[data-k="export-summary"]')!;
+
+  modeSel.value = settings.printRangeMode ?? "all";
+  annotationsBox.checked = settings.printIncludeAnnotations ?? true;
+  onlyBox.checked = settings.printOnlyAnnotated ?? false;
+
+  const options = (): PrintOptions => ({
+    rangeMode: modeSel.value as PrintOptions["rangeMode"],
+    rangeText: rangeInput.value,
+    includeAnnotations: annotationsBox.checked,
+    onlyAnnotated: onlyBox.checked,
+  });
+
+  const makeContext = (opts: PrintOptions): PrintContext => ({
+    doc,
+    annotations: viewer.getAnnotations(),
+    totalPages: total,
+    currentPage: viewer.getCurrentPage(),
+    options: opts,
+    toast: toast as PrintToast,
+  });
+
+  let printButton: HTMLButtonElement | null = null;
+  const refresh = () => {
+    const opts = options();
+    rangeInput.disabled = opts.rangeMode !== "custom";
+    const built = buildPrintPlan(total, viewer.getCurrentPage(), viewer.getAnnotations(), opts);
+    printSummary.textContent = built.error || planSummary(built.plan, opts.includeAnnotations);
+    printSummary.classList.toggle("error", Boolean(built.error));
+    exportLine.textContent = exportSummary(total, viewer.getAnnotations(), opts.includeAnnotations);
+    if (printButton) printButton.disabled = Boolean(built.error);
+  };
+
+  const persist = (opts: PrintOptions) => {
+    settings = {
+      ...settings,
+      printIncludeAnnotations: opts.includeAnnotations,
+      printRangeMode: opts.rangeMode,
+      printOnlyAnnotated: opts.onlyAnnotated,
+      printConfigured: true,
+    };
+    void api.saveSettings(settings).catch((e) => toast(`保存打印选项失败：${errorText(e)}`, "error"));
+  };
+
+  showModal({
+    title: "打印",
+    body,
+    focus: rangeInput,
+    actions: [
+      { label: "取消", kind: "ghost", onClick: () => undefined },
+      {
+        label: "导出 PDF…",
+        kind: "ghost",
+        onClick: () => {
+          const opts = options();
+          persist(opts);
+          window.setTimeout(() => void runExport(makeContext(opts)), 0);
+          return undefined;
+        },
+      },
+      {
+        label: "打印…",
+        kind: "primary",
+        onClick: () => {
+          const opts = options();
+          const built = buildPrintPlan(total, viewer.getCurrentPage(), viewer.getAnnotations(), opts);
+          if (built.error) {
+            toast(built.error, "error");
+            return undefined;
+          }
+          persist(opts);
+          window.setTimeout(() => void runPrint(makeContext(opts)), 0);
+          return undefined;
+        },
+      },
+    ],
+  });
+
+  const buttons = [...modalHost.querySelectorAll<HTMLButtonElement>(".modal-foot .modal-btn")];
+  printButton = buttons[2] ?? null;
+  const changed = () => refresh();
+  modeSel.addEventListener("change", changed);
+  rangeInput.addEventListener("input", changed);
+  annotationsBox.addEventListener("change", changed);
+  onlyBox.addEventListener("change", changed);
+  refresh();
+}
+
 // ---------------------------------------------------------------- settings
 
 function openSettings(focusPlugins = false): void {
@@ -1931,6 +2078,13 @@ function openSettings(focusPlugins = false): void {
         <button class="mini-link" data-act="copy-path">复制路径</button>
       </div>
     </div>
+    <div class="field sidecar">
+      <label>打印缓存</label>
+      <p class="plugin-hint">打印/导出生成的临时 PDF 存放在配置目录的 cache/print 下，启动时自动清理 24 小时前的文件。</p>
+      <div class="sidecar-actions">
+        <button class="mini-link" data-act="clear-print">清理打印缓存</button>
+      </div>
+    </div>
     <div class="field plugins">
       <div class="plugin-head">
         <label>翻译与查词插件</label>
@@ -1944,7 +2098,7 @@ function openSettings(focusPlugins = false): void {
       <div class="plugin-list" id="plugin-list"></div>
       <div class="plugin-editor hidden" id="plugin-editor"></div>
     </div>
-    <div class="field meta-line">PDF Viewer ${"0.1.0"} · Go + Wails + pdf.js</div>
+    <div class="field meta-line">PDF Viewer ${"0.2.0"} · Go + Wails + pdf.js</div>
   `;
 
   const themeSel = body.querySelector<HTMLSelectElement>('[data-k="theme"]')!;
@@ -1975,6 +2129,14 @@ function openSettings(focusPlugins = false): void {
   body.querySelector('[data-act="copy-path"]')?.addEventListener("click", async () => {
     if (!sidecar?.path) return;
     await navigator.clipboard.writeText(sidecar.path).then(() => toast("路径已复制")).catch(() => toast("复制失败", "error"));
+  });
+  body.querySelector('[data-act="clear-print"]')?.addEventListener("click", async () => {
+    try {
+      await api.clearPrintCache();
+      toast("打印缓存已清理");
+    } catch (e) {
+      toast(`清理失败：${errorText(e)}`, "error");
+    }
   });
   body.querySelector('[data-act="export"]')?.addEventListener("click", async () => {
     const doc = currentDoc;
@@ -2031,6 +2193,10 @@ function openSettings(focusPlugins = false): void {
             highlightColor: chosenColor,
             nightMode: night.checked,
             language: settings.language,
+            printIncludeAnnotations: settings.printIncludeAnnotations,
+            printRangeMode: settings.printRangeMode,
+            printOnlyAnnotated: settings.printOnlyAnnotated,
+            printConfigured: true,
           };
           settings = next;
           applyTheme();
@@ -2146,16 +2312,34 @@ function showModal(opts: {
 
 // ---------------------------------------------------------------- toast
 
-function toast(message: string, kind: "info" | "error" = "info"): void {
+function toast(
+  message: string,
+  kind: "info" | "error" = "info",
+  action?: { label: string; onClick: () => void },
+): void {
   const el = document.createElement("div");
   el.className = `toast ${kind}`;
   el.textContent = message;
+  if (action) {
+    const btn = document.createElement("button");
+    btn.className = "toast-action";
+    btn.type = "button";
+    btn.textContent = action.label;
+    btn.addEventListener("click", () => {
+      action.onClick();
+      el.remove();
+    });
+    el.append(btn);
+  }
   toastHost.append(el);
   window.setTimeout(() => el.classList.add("show"), 20);
-  window.setTimeout(() => {
-    el.classList.remove("show");
-    window.setTimeout(() => el.remove(), 220);
-  }, kind === "error" ? 4200 : 2400);
+  window.setTimeout(
+    () => {
+      el.classList.remove("show");
+      window.setTimeout(() => el.remove(), 220);
+    },
+    kind === "error" ? 4200 : action ? 7000 : 2400,
+  );
 }
 
 // ---------------------------------------------------------------- wiring
@@ -2209,6 +2393,7 @@ function wireUI(): void {
     void api.saveSettings(settings).catch(() => undefined);
   });
   btnRead.addEventListener("click", () => viewer.toggleReadCurrent());
+  btnPrint.addEventListener("click", () => openPrintPanel());
 
   $("#btn-sidebar").addEventListener("click", () => {
     if (sidebar.classList.contains("collapsed")) openSidebar();
@@ -2289,6 +2474,18 @@ function wireKeyboard(): void {
     if (mod && key.toLowerCase() === "f") {
       e.preventDefault();
       openSearch();
+      return;
+    }
+    if (mod && key.toLowerCase() === "p") {
+      e.preventDefault();
+      if (
+        currentDoc &&
+        !opening &&
+        !modalHost.firstElementChild &&
+        !document.querySelector(".print-progress")
+      ) {
+        openPrintPanel();
+      }
       return;
     }
     if (mod && (key === "=" || key === "+")) {

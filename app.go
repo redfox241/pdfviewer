@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,10 +22,11 @@ import (
 	"pdfviewer/internal/notestore"
 	"pdfviewer/internal/pdfstream"
 	"pdfviewer/internal/plugin"
+	"pdfviewer/internal/printstage"
 	"pdfviewer/internal/settings"
 )
 
-const appVersion = "0.1.0"
+const appVersion = "0.2.0"
 
 type App struct {
 	ctx      context.Context
@@ -33,6 +36,7 @@ type App struct {
 	recent   *library.Store
 	notes    *notestore.Store
 	plugins  *plugin.Store
+	prints   *printstage.Store
 
 	mu          sync.Mutex
 	docs        map[string]docEntry
@@ -41,6 +45,8 @@ type App struct {
 	libraryErr  string
 	notesErr    string
 	pluginErr   string
+	printErr    string
+	printLimit  int64
 
 	trMu      sync.Mutex
 	trCancels map[string]context.CancelFunc
@@ -107,6 +113,12 @@ func NewApp() *App {
 		a.pluginErr = err.Error()
 	}
 	a.plugins = plugins
+
+	prints, err := printstage.New(filepath.Join(cfgDir, "cache", "print"))
+	if err != nil {
+		a.printErr = err.Error()
+	}
+	a.prints = prints
 
 	for _, arg := range os.Args[1:] {
 		if strings.HasPrefix(arg, "-") {
@@ -729,4 +741,243 @@ func (a *App) RevealFile(path string) {
 	default:
 		_ = exec.Command("xdg-open", filepath.Dir(path)).Start()
 	}
+}
+
+// ---------------------------------------------------------------- printing
+
+// PrintOutcome tells the UI how a staged PDF left the application.
+type PrintOutcome struct {
+	Mode    string `json:"mode"` // dialog | viewer | exported | cancelled
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
+
+// ServeHTTP routes print staging requests and falls back to the PDF stream.
+func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/print/") {
+		a.servePrint(w, r)
+		return
+	}
+	a.stream.ServeHTTP(w, r)
+}
+
+func (a *App) servePrint(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/print/stage" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d, err := a.doc(r.Header.Get("X-Doc-Token"))
+	if err != nil {
+		http.Error(w, "文档未打开或会话已失效", http.StatusForbidden)
+		return
+	}
+	if a.prints == nil {
+		http.Error(w, "打印暂存不可用："+a.printErr, http.StatusServiceUnavailable)
+		return
+	}
+	limit := a.printLimit
+	if limit <= 0 {
+		limit = 512 << 20
+	}
+	body := http.MaxBytesReader(w, r.Body, limit)
+	job, err := a.prints.Stage(body, d.Path, d.Name, r.Header.Get("X-Print-Annotations") == "1")
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "打印文件过大", http.StatusRequestEntityTooLarge)
+			return
+		}
+		a.logf("print stage failed: %v", err)
+		http.Error(w, "无法暂存打印文件", http.StatusInternalServerError)
+		return
+	}
+	a.logf("print staged doc=%q id=%s annotations=%v", d.Path, job.ID, job.IncludeAnnotations)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]string{"id": job.ID})
+}
+
+// SaveStagedPDF writes a staged print PDF to a user-selected path.
+func (a *App) SaveStagedPDF(id, defaultName string) (string, error) {
+	job, ok := a.printJob(id)
+	if !ok {
+		return "", fmt.Errorf("打印文件已失效，请重试")
+	}
+	return a.saveStaged(job, defaultName)
+}
+
+// PrintStagedPDF opens a staged print PDF in the platform's print path.
+func (a *App) PrintStagedPDF(id string) (PrintOutcome, error) {
+	job, ok := a.printJob(id)
+	if !ok {
+		return PrintOutcome{}, fmt.Errorf("打印文件已失效，请重试")
+	}
+	name := printDefaultName(job.DocName, job.IncludeAnnotations)
+
+	switch goruntime.GOOS {
+	case "darwin":
+		if msg, err := a.printWithPreview(job.Path); err == nil {
+			return PrintOutcome{Mode: "dialog", Message: msg}, nil
+		} else {
+			a.logf("preview print failed: %v", err)
+			if err := exec.Command("open", "-a", "Preview", job.Path).Run(); err == nil {
+				return PrintOutcome{
+					Mode:    "viewer",
+					Message: "已在预览中打开，请按 ⌘P 打印。",
+				}, nil
+			}
+		}
+	case "windows":
+		if err := exec.Command("cmd", "/c", "start", "", job.Path).Run(); err == nil {
+			return PrintOutcome{
+				Mode:    "viewer",
+				Message: "已用系统默认阅读器打开，请按 Ctrl+P 打印。",
+			}, nil
+		} else {
+			a.logf("windows print handoff failed: %v", err)
+		}
+	default:
+		if err := exec.Command("xdg-open", job.Path).Run(); err == nil {
+			return PrintOutcome{Mode: "viewer", Message: "已用系统默认阅读器打开，请打印。"}, nil
+		}
+	}
+
+	saved, err := a.saveStaged(job, name)
+	if err != nil {
+		return PrintOutcome{}, err
+	}
+	if saved == "" {
+		return PrintOutcome{Mode: "cancelled", Message: "已取消打印。"}, nil
+	}
+	return PrintOutcome{
+		Mode:    "exported",
+		Path:    saved,
+		Message: "无法自动打开阅读器，已导出 PDF，可手动打开后打印。",
+	}, nil
+}
+
+// DiscardStagedPDF deletes a staged file when the user cancels.
+func (a *App) DiscardStagedPDF(id string) {
+	if a.prints != nil {
+		a.prints.Discard(id)
+	}
+}
+
+// ClearPrintCache removes temporary PDFs left by earlier print/export jobs.
+func (a *App) ClearPrintCache() error {
+	if a.prints == nil {
+		return fmt.Errorf("打印暂存不可用：%s", a.printErr)
+	}
+	return a.prints.ClearAll()
+}
+
+func (a *App) printJob(id string) (printstage.Job, bool) {
+	if a.prints == nil {
+		return printstage.Job{}, false
+	}
+	return a.prints.Get(id)
+}
+
+func (a *App) saveStaged(job printstage.Job, defaultName string) (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("应用尚未就绪")
+	}
+	name := filepath.Base(strings.TrimSpace(defaultName))
+	if name == "" || name == "." {
+		name = printDefaultName(job.DocName, job.IncludeAnnotations)
+	}
+	if !strings.EqualFold(filepath.Ext(name), ".pdf") {
+		name += ".pdf"
+	}
+	dir := filepath.Dir(job.DocPath)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		dir = ""
+	}
+	path, err := wruntime.SaveFileDialog(a.ctx, wruntime.SaveDialogOptions{
+		Title:            "导出带标注的 PDF",
+		DefaultDirectory: dir,
+		DefaultFilename:  name,
+		Filters: []wruntime.FileFilter{
+			{DisplayName: "PDF 文档 (*.pdf)", Pattern: "*.pdf"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	if !strings.EqualFold(filepath.Ext(path), ".pdf") {
+		path += ".pdf"
+	}
+	if err := a.prints.SaveTo(job.ID, path); err != nil {
+		return "", err
+	}
+	a.logf("exported print pdf doc=%q to=%q", job.DocPath, path)
+	return path, nil
+}
+
+const previewPrintScript = `on run argv
+  set wanted to item 1 of argv
+  tell application "Preview"
+    set target to missing value
+    repeat 50 times
+      try
+        set target to first document whose name is wanted
+        exit repeat
+      end try
+      delay 0.1
+    end repeat
+    if target is missing value then error "print document not found"
+    print target with print dialog
+  end tell
+end run`
+
+// printWithPreview asks Preview for its native print dialog. The call blocks
+// while the dialog is open, so success is reported after a short grace period.
+func (a *App) printWithPreview(path string) (string, error) {
+	// Open first: even if automation permission is denied, the user still has
+	// the document in Preview and can press ⌘P.
+	if err := exec.Command("open", "-a", "Preview", path).Run(); err != nil {
+		return "", err
+	}
+	cmd := exec.Command("osascript", "-e", previewPrintScript, filepath.Base(path))
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return "", err
+		}
+		return "已在预览中打开打印对话框。", nil
+	case <-time.After(2 * time.Second):
+		go func() {
+			if err := <-done; err != nil {
+				a.logf("preview print failed after handoff: %v", err)
+			}
+		}()
+		return "已在预览中打开并请求打印；若对话框未出现，请按 ⌘P。", nil
+	}
+}
+
+func printDefaultName(name string, includeAnnotations bool) string {
+	base := strings.TrimSpace(name)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	if base == "" {
+		base = "文档"
+	}
+	suffix := "副本"
+	if includeAnnotations {
+		suffix = "标注"
+	}
+	return base + " (" + suffix + ").pdf"
 }

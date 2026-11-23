@@ -10,6 +10,7 @@
 - **阅读进度**：停留自动标记已读，也可手动标记；顶部进度条、缩略图勾选、最近列表百分比
 - **导航**：缩略图侧栏、PDF 大纲、标注列表
 - **搜索**：文档内全文搜索、结果列表、上下跳转、区分大小写
+- **打印与导出**：把当前标注以矢量方式叠加到原 PDF 上，打印时可选全部 / 当前页 / 页码范围与「仅含标注页」；也可导出带标注的 PDF 副本（正文仍可选中、搜索，含可搜索的便签附录）
 - **翻译与查词**：选中文字 → 右键 →「翻译为中文」或「查词」；整句翻译后会按单词列出音标、词性和全部释义，在线翻译（OpenAI 兼容 / DeepL / Google / 百度 / 有道）与离线词典都以可选插件提供，默认不安装
 - **本地优先**：默认完全离线、无账号、无遥测；仅在你安装并启用在线翻译插件后，才会按插件声明的域名发起请求。阅读数据存本地 SQLite（WAL），旁挂 JSON 只用于导出/交换，原文件不变
 
@@ -19,7 +20,7 @@
 |----|------|
 | 桌面框架 | Wails v2（WKWebView / WebView2，无 cgo） |
 | 后端 | Go 1.23+，负责窗口、文件流（支持 Range）、SQLite 持久化、设置、最近文件 |
-| 渲染 | pdf.js 4.10.38（文本层 + canvas，兼容 Safari 16.4+ WebView） |
+| 渲染 | pdf.js 4.10.38（文本层 + canvas，兼容 Safari 16.4+ WebView）；pdf-lib 1.17 + fontkit（打印/导出矢量叠加） |
 | 前端 | TypeScript + Vite，原生 DOM 组件 |
 
 详细设计见 [docs/DESIGN.md](docs/DESIGN.md)。PDF 格式科普：[网页版](docs/pdf-format-guide.html) · [PDF 版](docs/pdf-format-guide.pdf)。
@@ -36,11 +37,15 @@
 │   ├── plugin/             # 翻译 / 离线词典插件（安装、校验、HTTP、SQLite）
 │   ├── library/            # 最近文件
 │   ├── pdfstream/          # 本地 PDF Range 流
+│   ├── printstage/         # 打印 PDF 暂存与临时文件清理
 │   └── settings/           # 设置
 ├── plugins/                # 可打包的示例插件源码（默认不安装）
 ├── frontend/
 │   ├── src/viewer.ts       # pdf.js 封装、虚拟滚动、缩放、搜索、工具
 │   ├── src/main.ts         # 应用装配与 UI 交互
+│   ├── src/print.ts        # 打印/导出流程、进度与取消
+│   ├── src/printcore.ts    # 范围解析、标注排序、PDF 坐标换算
+│   ├── src/print.worker.ts # 后台生成打印 PDF
 │   ├── src/styles.css      # 界面样式
 │   └── scripts/            # 构建前复制 cMaps / 字体 / wasm
 ├── build/                  # 图标与打包配置
@@ -124,12 +129,14 @@ wails build -platform windows/amd64 -nsis
 3. 顶部标注工具栏可切换选择、高亮、下划线、删除线、记号笔、涂改带、区域框选、便签、橡皮擦。
 4. 页面停留 3 秒自动标记已读（可在设置中关闭）；`R` 手动切换本页已读。
 5. `⌘/Ctrl + F` 搜索，`Enter` / `Shift + Enter` 在结果间跳转。
+6. `⌘/Ctrl + P` 打印：选择范围与是否包含标注后，macOS 会打开「预览」的打印对话框；Windows 用系统默认阅读器打开，按 `Ctrl+P` 打印。同一面板可用「导出 PDF…」生成带标注的副本。
 
 ### 快捷键
 
 | 操作 | macOS | Windows |
 |------|-------|---------|
 | 打开 / 搜索 | ⌘O / ⌘F | Ctrl+O / Ctrl+F |
+| 打印 | ⌘P | Ctrl+P |
 | 放大 / 缩小 / 实际大小 | ⌘± / ⌘0 | Ctrl± / Ctrl0 |
 | 适合宽度 / 整页 | ⌘1 / ⌘2 | Ctrl+1 / Ctrl+2 |
 | 上/下翻屏 | PgUp / PgDn、Space | 同左 |
@@ -172,6 +179,7 @@ Windows PowerShell：
 - 文档以内容指纹（大小 + 首尾各 1 MiB 哈希）识别，移动/重命名 PDF 不丢数据。
 - 旁挂 `报告.pdf.pdfviewer.json` 只用于**显式导出/导入**；旧版 sidecar 会在首次打开时自动导入一次，之后不再回写、不生成 `.bak`。
 - 设置与最近文件：`PDFViewer/settings.json`、`PDFViewer/recent.json`。
+- 打印/导出的临时 PDF：`PDFViewer/cache/print/`（权限 0600），启动时自动清理 24 小时前的文件；设置中可手动清理。
 - 插件与密钥：`PDFViewer/plugins/<id>/`；API Key 明文保存在插件的 `.config.json`（权限 `0600`），卸载插件会一并删除。
 - 设置面板提供「导出 .pdfviewer.json」「从同名文件导入」。
 
@@ -179,15 +187,17 @@ Windows PowerShell：
 
 ```bash
 go test ./...
+cd frontend && npm test
 ```
 
-后端覆盖 SQLite 增量读写、阅读状态 round-trip、标注 reconcile、旧 sidecar 迁移、指纹稳定性；前端交互（打开、翻页保存、标注保存、导出/导入入口）已在 Chromium + mock 绑定下验证，并用隔离 HOME 运行真实 Wails 应用确认数据库落盘、旧 sidecar 自动导入且不再生成 `.bak`。
+后端覆盖 SQLite 增量读写、阅读状态 round-trip、标注 reconcile、旧 sidecar 迁移、指纹稳定性、打印暂存与清理；前端 Vitest 覆盖页码范围解析、便签排序、范围摘要、PDF 坐标/旋转变换，以及真实 pdf-lib 生成（含中文附录与旋转页）。前端交互（打开、翻页保存、标注保存、导出/导入入口）已在 Chromium + mock 绑定下验证，并用隔离 HOME 运行真实 Wails 应用确认数据库落盘、旧 sidecar 自动导入且不再生成 `.bak`。
 
-## 已知限制（v0.1）
+## 已知限制（v0.2）
 
 - 扫描件没有文本层：使用「区域框选」标注；OCR 计划在 v2。
-- 暂不支持加密 PDF 的密码输入弹窗。
-- 标注不会写回原 PDF（设计如此）；「导出带标注的 PDF」在 v1.1。
+- 暂不支持加密 PDF 的密码输入弹窗；带密码的 PDF 也无法打印/导出。
+- 标注不会写回原 PDF（设计如此）；「打印 → 导出 PDF…」生成带标注的副本，原文件不变。副本会保留正文文本层、书签、链接与表单，但原文档的数字签名会失效。
+- 打印/导出需要把整份 PDF 载入内存，超过 100 MB 会先提示；临时文件放在配置目录 `cache/print/`，启动时清理 24 小时前的文件。
 - 文件关联（双击 PDF 打开）与多标签页在 v1.1。
 - 旋转角度不跨会话保存。
 - 尚未启用单实例锁：同一文档被两个窗口同时编辑时，后保存的一方可能覆盖前者。
@@ -195,5 +205,5 @@ go test ./...
 
 ## Roadmap
 
-- v1.1：导出带标注 PDF、文件关联、多标签页、旋转持久化、密码弹窗
-- v2：OCR、跨文档全文索引、标注拖拽与缩放、双页 / 分屏
+- v1.1：文件关联、多标签页、旋转持久化、密码弹窗、标注拖拽与缩放
+- v2：OCR、跨文档全文索引、双页 / 分屏

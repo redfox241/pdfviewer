@@ -3,6 +3,7 @@ import type {
   DocInfo,
   InstallCandidate,
   PluginInfo,
+  PrintOutcome,
   RecentEntry,
   Settings,
   SidecarLoad,
@@ -70,6 +71,11 @@ export const api = {
   lookupWord: (id: string, word: string) => call<DictResult>("LookupWord", id, word),
   lookupWords: (id: string, text: string) => call<DictResult[]>("LookupWords", id, text),
   openPluginsDir: () => call<void>("OpenPluginsDir"),
+  saveStagedPDF: (id: string, defaultName: string) =>
+    call<string>("SaveStagedPDF", id, defaultName),
+  printStagedPDF: (id: string) => call<PrintOutcome>("PrintStagedPDF", id),
+  discardStagedPDF: (id: string) => call<void>("DiscardStagedPDF", id),
+  clearPrintCache: () => call<void>("ClearPrintCache"),
 };
 
 export function errorText(e: unknown): string {

@@ -17,6 +17,11 @@ type Settings struct {
 	HighlightColor string `json:"highlightColor"` // default highlighter colour
 	NightMode      bool   `json:"nightMode"`      // invert page canvas
 	Language       string `json:"language"`       // zh | en
+
+	PrintIncludeAnnotations bool   `json:"printIncludeAnnotations"`
+	PrintRangeMode          string `json:"printRangeMode"` // all | current | custom
+	PrintOnlyAnnotated      bool   `json:"printOnlyAnnotated"`
+	PrintConfigured         bool   `json:"printConfigured"`
 }
 
 func Defaults() Settings {
@@ -28,6 +33,11 @@ func Defaults() Settings {
 		HighlightColor: "#ffd84d",
 		NightMode:      false,
 		Language:       "zh",
+
+		PrintIncludeAnnotations: true,
+		PrintRangeMode:          "all",
+		PrintOnlyAnnotated:      false,
+		PrintConfigured:         true,
 	}
 }
 
@@ -112,6 +122,20 @@ func normalize(v Settings) Settings {
 	}
 	if v.Language != "en" {
 		v.Language = "zh"
+	}
+	// Settings written before printing existed have no print fields. The
+	// bool cannot distinguish "missing" from "false", so a one-time marker
+	// upgrades them with the documented defaults.
+	if !v.PrintConfigured {
+		v.PrintIncludeAnnotations = true
+		v.PrintRangeMode = "all"
+		v.PrintOnlyAnnotated = false
+		v.PrintConfigured = true
+	}
+	switch v.PrintRangeMode {
+	case "all", "current", "custom":
+	default:
+		v.PrintRangeMode = "all"
 	}
 	return v
 }

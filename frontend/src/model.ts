@@ -153,6 +153,16 @@ export interface Settings {
   highlightColor: string;
   nightMode: boolean;
   language: string;
+  printIncludeAnnotations: boolean;
+  printRangeMode: "all" | "current" | "custom";
+  printOnlyAnnotated: boolean;
+  printConfigured: boolean;
+}
+
+export interface PrintOutcome {
+  mode: "dialog" | "viewer" | "exported" | "cancelled";
+  path: string;
+  message: string;
 }
 
 export interface RecentEntry {
