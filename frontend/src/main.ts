@@ -6,9 +6,11 @@ import {
   decodeSidecar,
   type Annotation,
   type DocInfo,
+  type InstallCandidate,
+  type PluginInfo,
+  type PluginKind,
   type RecentEntry,
   type Settings,
-  type Sidecar,
   type SidecarLoad,
   type Tool,
   uid,
@@ -58,10 +60,12 @@ let activeTool: Tool = "select";
 let toolColor = "#ffd84d";
 let pendingSelection: SelectionPayload | null = null;
 let selectionColor = "#ffd84d";
-let saveTimer = 0;
-let dirty = false;
-let lastPayload = "";
-let saveChain: Promise<void> = Promise.resolve();
+let readingTimer = 0;
+let annotationsTimer = 0;
+let lastReadingPayload = "";
+let lastAnnotationsPayload = "";
+let readingChain: Promise<void> = Promise.resolve();
+let annotationsChain: Promise<void> = Promise.resolve();
 let scrollSaveTimer = 0;
 let sidebarTab: "thumbs" | "outline" | "notes" = "thumbs";
 let searchResults: SearchResult[] = [];
@@ -71,6 +75,7 @@ let searchTimer = 0;
 let opening = false;
 let platform = "web";
 let zoomBadgeTimer = 0;
+let plugins: PluginInfo[] = [];
 
 // ---------------------------------------------------------------- boot
 
@@ -90,6 +95,7 @@ async function boot(): Promise<void> {
 
   selectionColor = settings.highlightColor;
   toolColor = settings.highlightColor;
+  void refreshPlugins();
 
   applyTheme();
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
@@ -121,7 +127,6 @@ async function boot(): Promise<void> {
   viewer.setNightMode(settings.nightMode);
   updateNightButton();
   buildPalette();
-  buildSelectionToolbar();
   wireUI();
   wireKeyboard();
   wireFileDrop();
@@ -174,7 +179,7 @@ function handlePageChange(page: number): void {
   updatePageInput(page);
   updateReadButton();
   viewer.syncThumbStates();
-  scheduleSave(400);
+  scheduleReadingSave(400);
 }
 
 function handleZoomChange(scale: number, mode: string): void {
@@ -185,16 +190,17 @@ function handleZoomChange(scale: number, mode: string): void {
   window.clearTimeout(zoomBadgeTimer);
   zoomBadgeTimer = window.setTimeout(() => zoomBadge.classList.add("hidden"), 900);
   zoomLabel.dataset.mode = mode;
-  scheduleSave(600);
+  scheduleReadingSave(600);
 }
 
 function handleSelection(sel: SelectionPayload | null): void {
   if (!sel || !sel.text.trim()) {
-    hideSelectionToolbar();
+    clearPendingSelection();
     return;
   }
+  // Selection alone does not open anything: annotations and translation live
+  // in the right-click menu, so left-drag selection stays unobtrusive.
   pendingSelection = sel;
-  showSelectionToolbar(sel);
 }
 
 function handleAnnotationSelect(ann: Annotation | null, anchor: DOMRect | null): void {
@@ -206,7 +212,7 @@ function handleAnnotationSelect(ann: Annotation | null, anchor: DOMRect | null):
 }
 
 function handleAnnotationsChange(): void {
-  scheduleSave(300);
+  scheduleAnnotationsSave(300);
   if (sidebarTab === "notes" && !sidebar.classList.contains("collapsed")) {
     void renderNotesPanel();
   }
@@ -217,7 +223,7 @@ function handleReadChange(): void {
   updateProgress();
   updateReadButton();
   viewer.syncThumbStates();
-  scheduleSave(400);
+  scheduleReadingSave(400);
 }
 
 function handleSearchResults(results: SearchResult[], index: number): void {
@@ -274,13 +280,13 @@ async function openPath(path: string): Promise<void> {
 async function openInfo(info: DocInfo): Promise<void> {
   await closeCurrent();
   setLoading(true);
-  hideSelectionToolbar();
+  clearPendingSelection();
   hideAnnotationPopover();
   hideSearch();
   currentDoc = info;
   sidecar = null;
-  dirty = false;
-  lastPayload = "";
+  lastReadingPayload = "";
+  lastAnnotationsPayload = "";
   docName.textContent = info.name;
   docTitle.title = info.path;
   pageInput.value = "1";
@@ -291,7 +297,7 @@ async function openInfo(info: DocInfo): Promise<void> {
     load = await api.loadSidecar(info.token);
   } catch (e) {
     toast(`读取标注失败：${errorText(e)}`, "error");
-    load = { data: "", path: "", portable: true, fingerprint: info.fingerprint, warning: "" };
+    load = { data: "", path: "", portable: false, fingerprint: info.fingerprint, warning: "" };
   }
   sidecar = load;
   if (load.warning) toast(load.warning, "error");
@@ -318,7 +324,8 @@ async function openInfo(info: DocInfo): Promise<void> {
     }
     return;
   }
-  scheduleSave(600);
+  lastAnnotationsPayload = JSON.stringify(viewer.getAnnotations());
+  scheduleReadingSave(600);
 
   if (import.meta.env.DEV || location.protocol === "http:") {
     window.setTimeout(() => {
@@ -330,9 +337,13 @@ async function openInfo(info: DocInfo): Promise<void> {
   }
 }
 
-async function closeCurrent(): Promise<void> {
+async function closeCurrent(save = true): Promise<void> {
   if (!currentDoc) return;
-  await flushSave();
+  window.clearTimeout(readingTimer);
+  readingTimer = 0;
+  window.clearTimeout(annotationsTimer);
+  annotationsTimer = 0;
+  if (save) await flushSave();
   const doc = currentDoc;
   currentDoc = null;
   try {
@@ -343,8 +354,9 @@ async function closeCurrent(): Promise<void> {
   }
   viewer.close();
   sidecar = null;
-  lastPayload = "";
-  hideSelectionToolbar();
+  lastReadingPayload = "";
+  lastAnnotationsPayload = "";
+  clearPendingSelection();
   hideAnnotationPopover();
   hideSearch();
   emptyEl.classList.remove("hidden");
@@ -358,54 +370,75 @@ async function closeCurrent(): Promise<void> {
   await refreshRecent();
 }
 
+async function reloadCurrent(): Promise<void> {
+  const doc = currentDoc;
+  if (!doc) return;
+  const path = doc.path;
+  // Do not flush: the point of reloading is to pick up the just-imported data.
+  await closeCurrent(false);
+  await openPath(path);
+}
+
 // ---------------------------------------------------------------- saving
 
-function scheduleSave(delay = 400): void {
+// Reading state (small, hot path) and annotations (larger, rare) are saved
+// independently. SQLite updates rows in place, so page turns and scroll idle
+// no longer rewrite a JSON file (and its .bak) every time.
+
+function scheduleReadingSave(delay = 600): void {
   if (!currentDoc) return;
-  dirty = true;
-  window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => void flushSave(), delay);
+  window.clearTimeout(readingTimer);
+  readingTimer = window.setTimeout(() => void flushReading(), delay);
 }
 
-function buildPayload(): string {
-  const doc = currentDoc!;
-  const payload: Sidecar = {
-    schema: 1,
-    doc: {
-      name: doc.name,
-      size: doc.size,
-      fingerprint: doc.fingerprint,
-      pages: viewer.getPages(),
-    },
-    reading: viewer.readingState(),
-    annotations: viewer.getAnnotations(),
-  };
-  return JSON.stringify(payload);
-}
-
-function flushSave(): Promise<void> {
+function flushReading(): Promise<void> {
   const doc = currentDoc;
   if (!doc) return Promise.resolve();
-  window.clearTimeout(saveTimer);
-  saveTimer = 0;
-  if (!dirty) return saveChain;
-  const payload = buildPayload();
-  dirty = false;
-  if (payload === lastPayload) return saveChain;
-  lastPayload = payload;
-
-  saveChain = saveChain.then(async () => {
+  window.clearTimeout(readingTimer);
+  readingTimer = 0;
+  const payload = JSON.stringify(viewer.readingState());
+  if (payload === lastReadingPayload) return readingChain;
+  lastReadingPayload = payload;
+  const pages = viewer.getPages();
+  readingChain = readingChain.then(async () => {
     try {
-      const path = await api.saveSidecar(doc.token, payload);
-      if (sidecar) sidecar.path = path;
+      await api.saveReading(doc.token, payload, pages);
     } catch (e) {
-      dirty = true;
+      lastReadingPayload = "";
+      toast(`保存阅读进度失败：${errorText(e)}`, "error");
+    }
+  });
+  void api.updateProgress(doc.token, pages, viewer.getProgress()).catch(() => undefined);
+  return readingChain;
+}
+
+function scheduleAnnotationsSave(delay = 400): void {
+  if (!currentDoc) return;
+  window.clearTimeout(annotationsTimer);
+  annotationsTimer = window.setTimeout(() => void flushAnnotations(), delay);
+}
+
+function flushAnnotations(): Promise<void> {
+  const doc = currentDoc;
+  if (!doc) return Promise.resolve();
+  window.clearTimeout(annotationsTimer);
+  annotationsTimer = 0;
+  const payload = JSON.stringify(viewer.getAnnotations());
+  if (payload === lastAnnotationsPayload) return annotationsChain;
+  lastAnnotationsPayload = payload;
+  annotationsChain = annotationsChain.then(async () => {
+    try {
+      await api.saveAnnotations(doc.token, payload);
+    } catch (e) {
+      lastAnnotationsPayload = "";
       toast(`保存标注失败：${errorText(e)}`, "error");
     }
   });
+  return annotationsChain;
+}
 
-  void api.updateProgress(doc.token, viewer.getPages(), viewer.getProgress()).catch(() => undefined);
-  return saveChain;
+function flushSave(): Promise<void> {
+  return Promise.all([flushReading(), flushAnnotations()]).then(() => undefined);
 }
 
 // ---------------------------------------------------------------- toolbar
@@ -478,82 +511,1002 @@ function updatePalette(): void {
   paletteColors.querySelectorAll<HTMLButtonElement>(".swatch").forEach((b) => {
     b.classList.toggle("active", b.dataset.color === toolColor);
   });
-  palette.classList.toggle("with-colors", isColorTool(activeTool));
-  paletteColors.style.display = isColorTool(activeTool) ? "grid" : "none";
+  paletteColors.style.display = isColorTool(activeTool) ? "flex" : "none";
 }
 
-// ---------------------------------------------------------------- selection toolbar
+// ---------------------------------------------------------------- selection actions
 
-let selToolbar: HTMLElement | null = null;
-
-function buildSelectionToolbar(): void {
-  const el = document.createElement("div");
-  el.className = "sel-toolbar hidden";
-  el.innerHTML = `
-    <div class="sel-colors">${COLORS.map(
-      (c) => `<button class="swatch" data-color="${c.value}" style="background:${c.value}" title="${c.name}"></button>`,
-    ).join("")}</div>
-    <div class="sel-actions">
-      <button class="sel-btn" data-act="highlight" title="高亮">${icon("highlighter")}</button>
-      <button class="sel-btn" data-act="underline" title="下划线">${icon("underline")}</button>
-      <button class="sel-btn" data-act="strikeout" title="删除线">${icon("strike")}</button>
-      <span class="sel-divider"></span>
-      <button class="sel-btn" data-act="copy" title="复制">${icon("copy")}</button>
-    </div>`;
-  el.addEventListener("mousedown", (e) => e.preventDefault());
-  el.querySelectorAll<HTMLButtonElement>(".sel-colors .swatch").forEach((b) => {
-    b.addEventListener("click", () => {
-      selectionColor = b.dataset.color!;
-      applySelection("highlight", selectionColor);
-    });
-  });
-  el.querySelectorAll<HTMLButtonElement>(".sel-btn").forEach((b) => {
-    b.addEventListener("click", () => {
-      const act = b.dataset.act;
-      if (act === "copy") {
-        void copySelection();
-      } else if (act === "highlight" || act === "underline" || act === "strikeout") {
-        applySelection(act, selectionColor);
-      }
-    });
-  });
-  popoverHost.append(el);
-  selToolbar = el;
-}
-
-function showSelectionToolbar(sel: SelectionPayload): void {
-  if (!selToolbar) return;
-  selToolbar.classList.remove("hidden");
-  const r = sel.rect;
-  const tw = selToolbar.offsetWidth;
-  const th = selToolbar.offsetHeight;
-  let left = r.left + r.width / 2 - tw / 2;
-  let top = r.top - th - 10;
-  if (top < 64) top = r.bottom + 10;
-  left = Math.max(12, Math.min(window.innerWidth - tw - 12, left));
-  top = Math.max(56, Math.min(window.innerHeight - th - 12, top));
-  selToolbar.style.left = `${left}px`;
-  selToolbar.style.top = `${top}px`;
-}
-
-function hideSelectionToolbar(): void {
+function clearPendingSelection(): void {
   pendingSelection = null;
-  selToolbar?.classList.add("hidden");
 }
 
 function applySelection(type: "highlight" | "underline" | "strikeout", color: string): void {
   if (!pendingSelection) return;
   viewer.annotateSelection(pendingSelection, type, color);
-  hideSelectionToolbar();
+  clearPendingSelection();
 }
 
-async function copySelection(): Promise<void> {
-  if (!pendingSelection) return;
+// ---------------------------------------------------------------- translation
+
+async function refreshPlugins(): Promise<void> {
+  plugins = await api.plugins().catch(() => []);
+}
+
+function defaultPlugin(kind: PluginKind): PluginInfo | null {
+  return (
+    plugins.find((p) => p.kind === kind && p.enabled && p.default) ??
+    plugins.find((p) => p.kind === kind && p.enabled) ??
+    null
+  );
+}
+
+// Deliberately conservative: at least two Latin letters, English letters must
+// make up 60% of letters+CJK, and there may not be more CJK than Latin.
+// This keeps mixed strings such as "使用 API 的 response" translatable while
+// rejecting Chinese prose.
+function looksEnglish(text: string): boolean {
+  const letters = text.match(/[A-Za-z]/g)?.length ?? 0;
+  const cjk = text.match(/[\u3400-\u9fff\uf900-\ufaff]/g)?.length ?? 0;
+  const words = text.match(/[A-Za-z]{2,}/g)?.length ?? 0;
+  if (letters < 2 || words < 1) return false;
+  if (cjk > letters) return false;
+  return letters / Math.max(1, letters + cjk) >= 0.6;
+}
+
+function isLookupText(text: string): boolean {
+  const words = text.trim().split(/\s+/);
+  return words.length <= 3 && text.length <= 48 && !/[.!?;:。！？；：]/.test(text);
+}
+
+let ctxMenu: HTMLElement | null = null;
+
+// A double-click can select a partial word (span boundary) or swallow a
+// neighbouring word (missing space in the text layer). For single-word
+// lookups, ask PDF.js text items for the word under the pointer instead of
+// trusting the browser's DOM selection.
+function refineLookupSelection(sel: SelectionPayload, x: number, y: number): SelectionPayload {
+  if (/\s/.test(sel.text.trim())) return sel;
+  const pageEl = document.elementFromPoint(x, y)?.closest?.(".page") as HTMLElement | null;
+  if (!pageEl) return sel;
+  const page = Number(pageEl.dataset.page);
+  if (!page) return sel;
+  const rect = pageEl.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return sel;
+  const nx = Math.max(0, Math.min(1, (x - rect.left) / rect.width));
+  const ny = Math.max(0, Math.min(1, (y - rect.top) / rect.height));
+  const word = viewer.wordAtPoint(page, nx, ny);
+  if (word && /^[A-Za-z][A-Za-z'’\-]*$/.test(word)) {
+    return { ...sel, text: word };
+  }
+  return sel;
+}
+
+function hideContextMenu(): void {
+  ctxMenu?.remove();
+  ctxMenu = null;
+}
+
+function showContextMenu(sel: SelectionPayload, x: number, y: number): void {
+  hideContextMenu();
+  clearPendingSelection();
+  const english = looksEnglish(sel.text);
+  const lookup = isLookupText(sel.text);
+  const translator = defaultPlugin("translator");
+  const dict = defaultPlugin("dictionary");
+
+  const el = document.createElement("div");
+  el.className = "ctx-menu";
+  el.addEventListener("mousedown", (e) => e.preventDefault());
+  const addItem = (label: string, hint: string, disabled: boolean, act: () => void): void => {
+    const btn = document.createElement("button");
+    btn.className = "ctx-item";
+    btn.type = "button";
+    const text = document.createElement("span");
+    text.textContent = label;
+    btn.append(text);
+    if (hint) {
+      const small = document.createElement("span");
+      small.className = "ctx-hint";
+      small.textContent = hint;
+      btn.append(small);
+    }
+    btn.disabled = disabled;
+    if (disabled && !english) btn.title = "所选内容不是英文";
+    btn.addEventListener("click", () => {
+      hideContextMenu();
+      act();
+    });
+    el.append(btn);
+  };
+  const addSep = (): void => {
+    const sep = document.createElement("div");
+    sep.className = "ctx-sep";
+    el.append(sep);
+  };
+
+  if (lookup) {
+    const lookupSel = refineLookupSelection(sel, x, y);
+    if (dict) addItem("查词", dict.name, !english, () => void runLookup(lookupSel, dict));
+    else addItem("查词（未启用词典插件）", "", !english, () => openSettings(true));
+  }
+  if (translator) addItem("翻译为中文", translator.name, !english, () => void runTranslate(sel, translator));
+  else addItem("翻译为中文（未启用插件）", "", !english, () => openSettings(true));
+
+  addSep();
+
+  const colorRow = document.createElement("div");
+  colorRow.className = "ctx-colors";
+  const colorLabel = document.createElement("span");
+  colorLabel.className = "ctx-label";
+  colorLabel.textContent = "颜色";
+  colorRow.append(colorLabel);
+  const paintColors = (): void => {
+    colorRow.querySelectorAll<HTMLButtonElement>(".swatch").forEach((b) => {
+      b.classList.toggle("active", b.dataset.color === selectionColor);
+    });
+  };
+  for (const color of COLORS) {
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = "swatch";
+    swatch.dataset.color = color.value;
+    swatch.title = color.name;
+    swatch.style.background = color.value;
+    swatch.addEventListener("click", () => {
+      selectionColor = color.value;
+      paintColors();
+    });
+    colorRow.append(swatch);
+  }
+  paintColors();
+  el.append(colorRow);
+
+  const actions = document.createElement("div");
+  actions.className = "ctx-actions";
+  const annotate = (type: "highlight" | "underline" | "strikeout", label: string, iconName: string): void => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ctx-action";
+    btn.title = label;
+    btn.innerHTML = `${icon(iconName)}<span>${label}</span>`;
+    btn.addEventListener("click", () => {
+      hideContextMenu();
+      viewer.annotateSelection(sel, type, selectionColor);
+    });
+    actions.append(btn);
+  };
+  annotate("highlight", "高亮", "highlighter");
+  annotate("underline", "下划线", "underline");
+  annotate("strikeout", "删除线", "strike");
+  el.append(actions);
+
+  addSep();
+  addItem("复制", "", false, () => {
+    void navigator.clipboard
+      .writeText(sel.text)
+      .then(() => toast("已复制"))
+      .catch(() => toast("复制失败", "error"));
+  });
+
+  popoverHost.append(el);
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  const left = Math.max(8, Math.min(window.innerWidth - w - 8, x));
+  const top = Math.max(8, Math.min(window.innerHeight - h - 8, y));
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+  ctxMenu = el;
+}
+
+let transCard: HTMLElement | null = null;
+let transBody: HTMLElement | null = null;
+let transKind: HTMLElement | null = null;
+let transMeta: HTMLElement | null = null;
+let transCopy: HTMLButtonElement | null = null;
+let transRetry: HTMLButtonElement | null = null;
+let transRequestID: string | null = null;
+let transCopyText = "";
+let transGeneration = 0;
+let transAnchor: DOMRect | null = null;
+let lastTransAction:
+  | { type: "translate"; pluginId: string; sel: SelectionPayload }
+  | { type: "lookup"; pluginId: string; sel: SelectionPayload }
+  | null = null;
+
+function buildTransCard(): void {
+  const el = document.createElement("div");
+  el.className = "trans-card hidden";
+  el.innerHTML = `
+    <div class="trans-head">
+      <span class="trans-kind"></span>
+      <span class="trans-meta"></span>
+      <button class="icon-btn small trans-close" type="button" title="关闭">${icon("close")}</button>
+    </div>
+    <div class="trans-body"></div>
+    <div class="trans-foot">
+      <button class="pop-btn" type="button" data-act="copy">${icon("copy")}<span>复制</span></button>
+      <button class="pop-btn" type="button" data-act="retry">${icon("refresh")}<span>重试</span></button>
+    </div>`;
+  el.addEventListener("mousedown", (e) => {
+    if ((e.target as HTMLElement).closest("button")) e.preventDefault();
+  });
+  el.querySelector(".trans-close")?.addEventListener("click", hideTransCard);
+  el.querySelector('[data-act="copy"]')?.addEventListener("click", () => {
+    if (!transCopyText) return;
+    void navigator.clipboard
+      .writeText(transCopyText)
+      .then(() => toast("已复制"))
+      .catch(() => toast("复制失败", "error"));
+  });
+  el.querySelector('[data-act="retry"]')?.addEventListener("click", retryTransAction);
+  popoverHost.append(el);
+  transCard = el;
+  transBody = el.querySelector(".trans-body")!;
+  transKind = el.querySelector(".trans-kind")!;
+  transMeta = el.querySelector(".trans-meta")!;
+  transCopy = el.querySelector('[data-act="copy"]') as HTMLButtonElement;
+  transRetry = el.querySelector('[data-act="retry"]') as HTMLButtonElement;
+}
+
+function openTransCard(rect: DOMRect, kind: string, meta: string): void {
+  if (!transCard) buildTransCard();
+  if (!transCard || !transBody || !transKind || !transMeta) return;
+  hideContextMenu();
+  hideAnnotationPopover();
+  transGeneration++;
+  transAnchor = rect;
+  transCopyText = "";
+  transCopy?.classList.add("hidden");
+  transRetry?.classList.add("hidden");
+  transKind.textContent = kind;
+  transMeta.textContent = meta;
+  transBody.className = "trans-body";
+  transBody.innerHTML = "";
+  transCard.classList.remove("hidden");
+  placeTransCard();
+}
+
+function placeTransCard(): void {
+  if (!transCard || !transAnchor) return;
+  const w = transCard.offsetWidth;
+  const h = transCard.offsetHeight;
+  const gap = 10;
+  let left = transAnchor.left;
+  let top = transAnchor.bottom + gap;
+  if (top + h > window.innerHeight - 12) top = Math.max(56, transAnchor.top - h - gap);
+  left = Math.max(12, Math.min(window.innerWidth - w - 12, left));
+  top = Math.max(56, Math.min(window.innerHeight - h - 12, top));
+  transCard.style.left = `${left}px`;
+  transCard.style.top = `${top}px`;
+}
+
+function hideTransCard(): void {
+  if (transRequestID) {
+    void api.cancelTranslate(transRequestID).catch(() => undefined);
+    transRequestID = null;
+  }
+  transCard?.classList.add("hidden");
+  transGeneration++;
+  lastTransAction = null;
+}
+
+function setTransLoading(label: string): void {
+  if (!transBody || !transCard) return;
+  transBody.className = "trans-body";
+  transBody.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "trans-loading";
+  const spin = document.createElement("span");
+  spin.className = "trans-spinner";
+  const text = document.createElement("span");
+  text.textContent = label;
+  wrap.append(spin, text);
+  transBody.append(wrap);
+  transCopy?.classList.add("hidden");
+  transRetry?.classList.add("hidden");
+  placeTransCard();
+}
+
+function setTransError(message: string): void {
+  if (!transBody) return;
+  transBody.className = "trans-body";
+  transBody.innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "trans-error";
+  box.textContent = message;
+  transBody.append(box);
+  transRetry?.classList.remove("hidden");
+  transCopy?.classList.add("hidden");
+  placeTransCard();
+}
+
+// PDF text layers put every visual line on its own line. Sending those raw
+// newlines to a translation model can split a sentence around a place name or
+// produce template-like output such as "向……发起突袭 葛底斯堡". Join soft
+// line wraps, keep blank-line paragraph breaks, and repair hyphenated wraps.
+function translationInput(text: string): string {
+  return text
+    .replace(/[\u200b-\u200d\u2060\ufeff\u00ad]/g, "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .replace(/([A-Za-z])-\n([a-z])/g, "$1$2")
+    .replace(/([^\n])\n(?!\n)/g, "$1 ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+async function runTranslate(sel: SelectionPayload, plugin: PluginInfo): Promise<void> {
+  lastTransAction = { type: "translate", pluginId: plugin.id, sel };
+  openTransCard(sel.rect, "英 → 简中", plugin.model ? `${plugin.name} · ${plugin.model}` : plugin.name);
+  const generation = transGeneration;
+  setTransLoading("正在翻译…");
+  if (transRequestID) await api.cancelTranslate(transRequestID).catch(() => undefined);
+  const reqID = `tr-${uid()}`;
+  transRequestID = reqID;
   try {
-    await navigator.clipboard.writeText(pendingSelection.text);
-    toast("已复制");
-  } catch {
-    toast("复制失败", "error");
+    const result = await api.translate(reqID, plugin.id, translationInput(sel.text));
+    if (transRequestID !== reqID || generation !== transGeneration) return;
+    transRequestID = null;
+    if (!transBody || !transMeta) return;
+    transBody.className = "trans-body";
+    transBody.innerHTML = "";
+    const sourceLabel = document.createElement("div");
+    sourceLabel.className = "trans-label";
+    sourceLabel.textContent = "原文";
+    const source = document.createElement("div");
+    source.className = "trans-source";
+    source.textContent = sel.text;
+    const divider = document.createElement("div");
+    divider.className = "trans-divider";
+    const targetLabel = document.createElement("div");
+    targetLabel.className = "trans-label";
+    targetLabel.textContent = "译文";
+    const text = document.createElement("div");
+    text.className = "trans-text";
+    text.textContent = result.text;
+    transBody.append(sourceLabel, source, divider, targetLabel, text);
+    transCopyText = result.text;
+    transMeta.textContent = `${plugin.name}${result.cached ? " · 缓存" : ""}`;
+    transCopy?.classList.remove("hidden");
+    transRetry?.classList.add("hidden");
+    placeTransCard();
+    void appendSentenceWords(sel.text, generation);
+  } catch (e) {
+    if (transRequestID !== reqID || generation !== transGeneration) return;
+    transRequestID = null;
+    setTransError(errorText(e));
+  }
+}
+
+// After a sentence translation, look up every unique word in the enabled
+// offline dictionary and show phonetics, POS and all senses.
+async function appendSentenceWords(text: string, generation: number): Promise<void> {
+  if (!transBody) return;
+  const seen = new Set<string>();
+  const tokens: string[] = [];
+  for (const match of text.match(/[A-Za-z]+(?:['’\-][A-Za-z]+)*/g) ?? []) {
+    const key = match.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tokens.push(match);
+  }
+  if (tokens.length < 2) return;
+
+  const section = document.createElement("div");
+  section.className = "trans-words";
+  const head = document.createElement("div");
+  head.className = "trans-words-head";
+  const title = document.createElement("span");
+  title.className = "trans-words-title";
+  title.textContent = "单词";
+  const meta = document.createElement("span");
+  meta.className = "trans-words-meta";
+  meta.textContent = `共 ${tokens.length} 个`;
+  head.append(title, meta);
+  const body = document.createElement("div");
+  body.className = "trans-words-body";
+  const loading = document.createElement("div");
+  loading.className = "trans-loading";
+  const spin = document.createElement("span");
+  spin.className = "trans-spinner";
+  const loadingText = document.createElement("span");
+  loadingText.textContent = "正在查词…";
+  loading.append(spin, loadingText);
+  body.append(loading);
+  section.append(head, body);
+  transBody.append(section);
+  placeTransCard();
+
+  const dict = defaultPlugin("dictionary");
+  if (!dict) {
+    body.innerHTML = "";
+    const hint = document.createElement("div");
+    hint.className = "trans-sub";
+    hint.textContent = "启用离线词典插件后，可在这里查看每个单词的音标、词性和释义。";
+    body.append(hint);
+    placeTransCard();
+    return;
+  }
+  meta.textContent = `${dict.name} · 共 ${tokens.length} 个`;
+  try {
+    const results = await api.lookupWords(dict.id, text);
+    if (generation !== transGeneration || !transBody?.contains(section)) return;
+    body.innerHTML = "";
+    const found = results.filter((r) => r.found && r.entries.length > 0);
+    if (!found.length) {
+      const empty = document.createElement("div");
+      empty.className = "trans-sub";
+      empty.textContent = "离线词典未收录这些单词。";
+      body.append(empty);
+    }
+    for (const res of found) {
+      const row = document.createElement("div");
+      row.className = "word-row";
+      const line = document.createElement("div");
+      line.className = "word-head";
+      const name = document.createElement("span");
+      name.className = "word-name";
+      name.textContent = res.word;
+      line.append(name);
+      if (res.phonetic) {
+        const ph = document.createElement("span");
+        ph.className = "word-phonetic";
+        ph.textContent = res.phonetic;
+        line.append(ph);
+      }
+      row.append(line);
+      const entries = document.createElement("div");
+      entries.className = "word-entries";
+      for (const entry of res.entries) {
+        const item = document.createElement("div");
+        item.className = "word-entry";
+        if (entry.pos) {
+          const pos = document.createElement("span");
+          pos.className = "dict-pos";
+          pos.textContent = entry.pos;
+          item.append(pos);
+        }
+        const def = document.createElement("span");
+        def.className = "word-def";
+        def.textContent = entry.translation;
+        item.append(def);
+        entries.append(item);
+      }
+      row.append(entries);
+      if (res.lemma) {
+        const lemma = document.createElement("div");
+        lemma.className = "trans-sub";
+        lemma.textContent = `原型：${res.lemma}`;
+        row.append(lemma);
+      }
+      body.append(row);
+    }
+    const missing = results.filter((r) => !r.found).map((r) => r.word);
+    if (missing.length) {
+      const note = document.createElement("div");
+      note.className = "word-missing";
+      const shown = missing.slice(0, 12).join("、");
+      note.textContent = `未收录：${shown}${missing.length > 12 ? "…" : ""}`;
+      body.append(note);
+    }
+    meta.textContent = `${dict.name} · ${found.length}/${results.length} 词`;
+    placeTransCard();
+  } catch (e) {
+    if (generation !== transGeneration || !transBody?.contains(section)) return;
+    body.innerHTML = "";
+    const error = document.createElement("div");
+    error.className = "trans-sub";
+    error.textContent = `查词失败：${errorText(e)}`;
+    body.append(error);
+    placeTransCard();
+  }
+}
+
+async function runLookup(sel: SelectionPayload, plugin: PluginInfo): Promise<void> {
+  lastTransAction = { type: "lookup", pluginId: plugin.id, sel };
+  if (transRequestID) {
+    void api.cancelTranslate(transRequestID).catch(() => undefined);
+    transRequestID = null;
+  }
+  openTransCard(sel.rect, "离线词典", plugin.name);
+  setTransLoading("正在查词…");
+  try {
+    const result = await api.lookupWord(plugin.id, sel.text);
+    if (!transBody) return;
+    transBody.className = "trans-body";
+    transBody.innerHTML = "";
+    if (!result.found) {
+      const empty = document.createElement("div");
+      empty.className = "trans-empty";
+      empty.textContent = `词表中没有「${result.word}」`;
+      const hint = document.createElement("div");
+      hint.className = "trans-sub";
+      hint.textContent = "离线词典只支持查词；整句请使用在线翻译插件。";
+      transBody.append(empty, hint);
+      transCopy?.classList.add("hidden");
+      transRetry?.classList.add("hidden");
+      placeTransCard();
+      return;
+    }
+
+    const head = document.createElement("div");
+    head.className = "dict-head";
+    const word = document.createElement("span");
+    word.className = "dict-word";
+    word.textContent = result.word;
+    head.append(word);
+    if (result.phonetic) {
+      const ph = document.createElement("span");
+      ph.className = "dict-phonetic";
+      ph.textContent = result.phonetic;
+      head.append(ph);
+    }
+    transBody.append(head);
+    if (result.lemma) {
+      const lemma = document.createElement("div");
+      lemma.className = "trans-sub";
+      lemma.textContent = `原型：${result.lemma}`;
+      transBody.append(lemma);
+    }
+    const list = document.createElement("div");
+    list.className = "dict-entries";
+    for (const entry of result.entries) {
+      const row = document.createElement("div");
+      row.className = "dict-entry";
+      if (entry.pos) {
+        const pos = document.createElement("span");
+        pos.className = "dict-pos";
+        pos.textContent = entry.pos;
+        row.append(pos);
+      }
+      const def = document.createElement("span");
+      def.className = "dict-def";
+      def.textContent = entry.translation;
+      row.append(def);
+      list.append(row);
+    }
+    transBody.append(list);
+    transCopyText = result.entries
+      .map((e) => (e.pos ? `${e.pos} ${e.translation}` : e.translation))
+      .join("\n");
+    transCopy?.classList.remove("hidden");
+    transRetry?.classList.add("hidden");
+    placeTransCard();
+  } catch (e) {
+    setTransError(errorText(e));
+  }
+}
+
+function retryTransAction(): void {
+  if (!lastTransAction) return;
+  const action = lastTransAction;
+  if (action.type === "translate") {
+    const plugin = plugins.find((p) => p.id === action.pluginId);
+    if (plugin) void runTranslate(action.sel, plugin);
+  } else {
+    const plugin = plugins.find((p) => p.id === action.pluginId);
+    if (plugin) void runLookup(action.sel, plugin);
+  }
+}
+
+document.addEventListener("contextmenu", (e) => {
+  if (e.defaultPrevented) return;
+  const target = e.target as Node | null;
+  if (!target || !pagesEl.contains(target) || !viewer) return;
+  // Pin the payload captured on mouseup. Re-reading the live DOM selection
+  // here can return a different word after WebKit handles the right-click.
+  const sel = pendingSelection ?? viewer.readSelection();
+  if (!sel) return;
+  e.preventDefault();
+  showContextMenu(sel, e.clientX, e.clientY);
+});
+
+// ---------------------------------------------------------------- plugin settings
+
+let pluginListEl: HTMLElement | null = null;
+let pluginEditorEl: HTMLElement | null = null;
+let pendingInstallToken: string | null = null;
+
+function pluginKindLabel(kind: PluginKind): string {
+  return kind === "translator" ? "在线翻译" : "离线词典";
+}
+
+function providerLabel(p: PluginInfo): string {
+  if (p.kind === "dictionary") return "SQLite";
+  switch (p.provider) {
+    case "openai":
+      return "OpenAI 兼容";
+    case "deepl":
+      return "DeepL";
+    case "google":
+      return "Google 翻译";
+    case "baidu":
+      return "百度翻译";
+    case "baidu-llm":
+      return "百度大模型翻译";
+    case "youdao":
+      return "有道翻译";
+    default:
+      return p.provider;
+  }
+}
+
+function needsCredentials(p: PluginInfo): boolean {
+  if (!p.requiresKey) return false;
+  if (!p.hasKey) return true;
+  return p.requiresAppId && !p.hasAppId;
+}
+
+async function refreshPluginSection(): Promise<void> {
+  const list = pluginListEl;
+  if (!list || !list.isConnected) return;
+  await refreshPlugins();
+  list.innerHTML = "";
+  if (!plugins.length) {
+    const empty = document.createElement("div");
+    empty.className = "plugin-empty";
+    empty.textContent = "尚未安装插件。离线词典和在线翻译都需要安装一个插件后才会启用。";
+    list.append(empty);
+    return;
+  }
+  for (const plugin of plugins) list.append(pluginRow(plugin));
+}
+
+function pluginRow(p: PluginInfo): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "plugin-row";
+  const main = document.createElement("div");
+  main.className = "plugin-main";
+
+  const title = document.createElement("div");
+  title.className = "plugin-title";
+  const name = document.createElement("span");
+  name.className = "plugin-name";
+  name.textContent = p.name;
+  const kind = document.createElement("span");
+  kind.className = "plugin-badge";
+  kind.textContent = pluginKindLabel(p.kind);
+  title.append(name, kind);
+  if (p.default) {
+    const badge = document.createElement("span");
+    badge.className = "plugin-badge default";
+    badge.textContent = "默认";
+    title.append(badge);
+  }
+  const meta = document.createElement("div");
+  meta.className = "plugin-meta";
+  const bits = [`v${p.version}`, providerLabel(p)];
+  if (p.model) bits.push(p.model);
+  if (p.host) bits.push(p.host);
+  if (p.license) bits.push(p.license);
+  meta.textContent = bits.join(" · ");
+
+  main.append(title, meta);
+  if (p.description) {
+    const desc = document.createElement("div");
+    desc.className = "plugin-desc";
+    desc.textContent = p.description;
+    main.append(desc);
+  }
+  if (needsCredentials(p)) {
+    const warn = document.createElement("div");
+    warn.className = "plugin-warn";
+    warn.textContent = p.requiresAppId ? "尚未配置 AppID / 密钥" : "尚未配置 API Key";
+    main.append(warn);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "plugin-actions";
+  const toggle = document.createElement("label");
+  toggle.className = "switch";
+  toggle.title = p.enabled ? "停用插件" : "启用插件";
+  const check = document.createElement("input");
+  check.type = "checkbox";
+  check.checked = p.enabled;
+  const track = document.createElement("span");
+  track.className = "switch-track";
+  toggle.append(check, track);
+  check.addEventListener("change", () => {
+    if (check.checked && needsCredentials(p)) {
+      check.checked = false;
+      showKeyEditor(p, true);
+      return;
+    }
+    void applyPluginUpdate(api.setPluginEnabled(p.id, check.checked));
+  });
+  actions.append(toggle);
+
+  if (!p.default) {
+    const def = document.createElement("button");
+    def.type = "button";
+    def.className = "mini-link";
+    def.textContent = "设为默认";
+    def.addEventListener("click", () => {
+      if (needsCredentials(p)) {
+        showKeyEditor(p, true);
+        return;
+      }
+      void applyPluginUpdate(api.setPluginDefault(p.id));
+    });
+    actions.append(def);
+  }
+  if (p.kind === "translator" && p.requiresKey) {
+    const key = document.createElement("button");
+    key.type = "button";
+    key.className = "mini-link";
+    key.textContent = p.requiresAppId
+      ? (p.hasKey && p.hasAppId ? "更换凭据" : "配置凭据")
+      : p.hasKey
+        ? "更换密钥"
+        : "配置密钥";
+    key.addEventListener("click", () => showKeyEditor(p, false));
+    actions.append(key);
+  }
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "mini-link danger";
+  remove.textContent = "卸载";
+  remove.addEventListener("click", () => showUninstallConfirm(p));
+  actions.append(remove);
+
+  row.append(main, actions);
+  return row;
+}
+
+async function applyPluginUpdate(promise: Promise<PluginInfo[]>): Promise<void> {
+  try {
+    plugins = await promise;
+    await refreshPluginSection();
+  } catch (e) {
+    toast(`插件操作失败：${errorText(e)}`, "error");
+    await refreshPluginSection();
+  }
+}
+
+function clearPluginEditor(): void {
+  if (!pluginEditorEl) return;
+  pluginEditorEl.innerHTML = "";
+  pluginEditorEl.classList.add("hidden");
+}
+
+function showKeyEditor(p: PluginInfo, enableAfter: boolean): void {
+  if (!pluginEditorEl) return;
+  const box = pluginEditorEl;
+  box.innerHTML = "";
+  box.classList.remove("hidden");
+  const twoPart = p.requiresAppId;
+  const baidu = p.provider === "baidu" || p.provider === "baidu-llm";
+  const title = document.createElement("div");
+  title.className = "plugin-editor-title";
+  title.textContent = twoPart
+    ? `${p.name} · ${baidu ? "AppID 与 API Key" : "AppID 与密钥"}`
+    : `${p.name} · API Key`;
+  const hint = document.createElement("div");
+  hint.className = "plugin-editor-hint";
+  hint.textContent = twoPart
+    ? baidu
+      ? "百度翻译需要 AppID 与 API Key。两者以明文保存在本机插件配置文件中（权限 0600），不会随插件卸载保留。"
+      : "有道翻译需要 AppKey 与 AppSecret。两者以明文保存在本机插件配置文件中（权限 0600），不会随插件卸载保留。"
+    : "密钥以明文保存在本机插件配置文件中（权限 0600），不会随插件卸载保留。";
+
+  const appIDInput = document.createElement("input");
+  appIDInput.type = "text";
+  appIDInput.placeholder = p.hasAppId
+    ? "输入新的 AppID（留空则保持不变）"
+    : baidu
+      ? "粘贴 AppID"
+      : "粘贴 AppID / AppKey";
+  appIDInput.autocomplete = "off";
+  appIDInput.spellcheck = false;
+
+  const input = document.createElement("input");
+  input.type = "password";
+  input.placeholder = p.hasKey
+    ? "输入新的 API Key（留空则保持不变）"
+    : twoPart
+      ? baidu
+        ? "粘贴 API Key"
+        : "粘贴密钥 / AppSecret"
+      : "粘贴 API Key";
+  input.autocomplete = "off";
+
+  const actions = document.createElement("div");
+  actions.className = "plugin-editor-actions";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "modal-btn primary";
+  save.textContent = "保存";
+  save.addEventListener("click", async () => {
+    const appID = appIDInput.value.trim();
+    const value = input.value.trim();
+    if (twoPart && !appID) {
+      appIDInput.focus();
+      return;
+    }
+    if (!value) {
+      input.focus();
+      return;
+    }
+    save.disabled = true;
+    try {
+      if (twoPart) {
+        plugins = await api.setPluginCredentials(p.id, appID, value);
+      } else {
+        plugins = await api.setPluginKey(p.id, value);
+      }
+      if (enableAfter) plugins = await api.setPluginEnabled(p.id, true);
+      toast(twoPart ? "凭据已保存" : "密钥已保存");
+      clearPluginEditor();
+      await refreshPluginSection();
+    } catch (e) {
+      toast(`保存失败：${errorText(e)}`, "error");
+    } finally {
+      save.disabled = false;
+    }
+  });
+  actions.append(save);
+  if (p.hasKey) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "modal-btn ghost";
+    clear.textContent = twoPart ? "清除凭据" : "清除密钥";
+    clear.addEventListener("click", async () => {
+      try {
+        if (twoPart) {
+          plugins = await api.setPluginCredentials(p.id, "", "");
+        } else {
+          plugins = await api.setPluginKey(p.id, "");
+        }
+        plugins = await api.setPluginEnabled(p.id, false);
+        toast(twoPart ? "凭据已清除，插件已停用" : "密钥已清除，插件已停用");
+        clearPluginEditor();
+        await refreshPluginSection();
+      } catch (e) {
+        toast(`清除失败：${errorText(e)}`, "error");
+      }
+    });
+    actions.append(clear);
+  }
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "modal-btn ghost";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", clearPluginEditor);
+  actions.append(cancel);
+  box.append(title, hint);
+  if (twoPart) {
+    const idLabel = document.createElement("label");
+    idLabel.className = "plugin-input-label";
+    idLabel.textContent = baidu ? "AppID" : "AppID / AppKey";
+    box.append(idLabel, appIDInput);
+    const keyLabel = document.createElement("label");
+    keyLabel.className = "plugin-input-label";
+    keyLabel.textContent = baidu ? "API Key" : "密钥 / AppSecret";
+    box.append(keyLabel);
+  }
+  box.append(input, actions);
+  window.setTimeout(() => (twoPart ? appIDInput : input).focus(), 20);
+}
+
+function showUninstallConfirm(p: PluginInfo): void {
+  if (!pluginEditorEl) return;
+  const box = pluginEditorEl;
+  box.innerHTML = "";
+  box.classList.remove("hidden");
+  const title = document.createElement("div");
+  title.className = "plugin-editor-title";
+  title.textContent = `卸载 ${p.name}？`;
+  const hint = document.createElement("div");
+  hint.className = "plugin-editor-hint";
+  hint.textContent = "插件文件、配置和 API Key 都会删除，操作不可撤销。";
+  const actions = document.createElement("div");
+  actions.className = "plugin-editor-actions";
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "modal-btn danger";
+  confirm.textContent = "卸载";
+  confirm.addEventListener("click", async () => {
+    confirm.disabled = true;
+    try {
+      plugins = await api.uninstallPlugin(p.id);
+      toast("插件已卸载");
+      clearPluginEditor();
+      await refreshPluginSection();
+    } catch (e) {
+      toast(`卸载失败：${errorText(e)}`, "error");
+      confirm.disabled = false;
+    }
+  });
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "modal-btn ghost";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", clearPluginEditor);
+  actions.append(confirm, cancel);
+  box.append(title, hint, actions);
+}
+
+async function installPluginFlow(): Promise<void> {
+  try {
+    const candidate = await api.pickPlugin();
+    if (candidate) handleCandidate(candidate);
+  } catch (e) {
+    toast(`插件校验失败：${errorText(e)}`, "error");
+  }
+}
+
+function handleCandidate(candidate: InstallCandidate): void {
+  if (pendingInstallToken && pendingInstallToken !== candidate.token) {
+    void api.cancelPluginInstall(pendingInstallToken).catch(() => undefined);
+  }
+  pendingInstallToken = candidate.token;
+  if (!pluginEditorEl) {
+    void commitCandidate(candidate);
+    return;
+  }
+  if (candidate.existing) {
+    showInstallConfirm(candidate);
+    return;
+  }
+  void commitCandidate(candidate);
+}
+
+function showInstallConfirm(candidate: InstallCandidate): void {
+  if (!pluginEditorEl) return;
+  const box = pluginEditorEl;
+  box.innerHTML = "";
+  box.classList.remove("hidden");
+  const title = document.createElement("div");
+  title.className = "plugin-editor-title";
+  title.textContent = `已安装 ${candidate.name}`;
+  const hint = document.createElement("div");
+  hint.className = "plugin-editor-hint";
+  hint.textContent = `当前 v${candidate.existingVersion}，新包 v${candidate.version}。更新会保留原有开关和 API Key。`;
+  const actions = document.createElement("div");
+  actions.className = "plugin-editor-actions";
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "modal-btn primary";
+  confirm.textContent = "更新插件";
+  confirm.addEventListener("click", () => void commitCandidate(candidate));
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "modal-btn ghost";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", () => {
+    void api.cancelPluginInstall(candidate.token).catch(() => undefined);
+    pendingInstallToken = null;
+    clearPluginEditor();
+  });
+  actions.append(confirm, cancel);
+  box.append(title, hint, actions);
+}
+
+async function commitCandidate(candidate: InstallCandidate): Promise<void> {
+  try {
+    plugins = await api.installPlugin(candidate.token);
+    pendingInstallToken = null;
+    toast(`已安装 ${candidate.name} v${candidate.version}`);
+    clearPluginEditor();
+    await refreshPluginSection();
+  } catch (e) {
+    toast(`安装失败：${errorText(e)}`, "error");
+    void api.cancelPluginInstall(candidate.token).catch(() => undefined);
+    pendingInstallToken = null;
+    clearPluginEditor();
+  }
+}
+
+async function installDropped(path: string): Promise<void> {
+  if (!pluginListEl?.isConnected) {
+    toast("请先打开设置页的插件列表，再拖入插件文件", "error");
+    return;
+  }
+  try {
+    const candidate = await api.stagePlugin(path);
+    if (candidate) handleCandidate(candidate);
+  } catch (e) {
+    toast(`插件校验失败：${errorText(e)}`, "error");
   }
 }
 
@@ -631,7 +1584,13 @@ document.addEventListener("pointerdown", (e) => {
   if (annPopover && !annPopover.contains(t) && !(t instanceof Element && t.closest(".ann"))) {
     hideAnnotationPopover();
   }
-  if (selToolbar && !selToolbar.contains(t)) hideSelectionToolbar();
+  // Keep the left-drag selection alive for the right-click menu; WebKit may
+  // otherwise move the selection to the word under the pointer.
+  if (e.button !== 2 && !(t instanceof Element && t.closest(".ctx-menu, .trans-card"))) {
+    clearPendingSelection();
+  }
+  if (ctxMenu && !ctxMenu.contains(t)) hideContextMenu();
+  if (transCard && !transCard.classList.contains("hidden") && !transCard.contains(t)) hideTransCard();
 });
 
 // ---------------------------------------------------------------- note editor
@@ -923,7 +1882,7 @@ async function refreshRecent(): Promise<void> {
 
 // ---------------------------------------------------------------- settings
 
-function openSettings(): void {
+function openSettings(focusPlugins = false): void {
   const body = document.createElement("div");
   body.className = "settings";
 
@@ -963,12 +1922,27 @@ function openSettings(): void {
       ).join("")}</div>
     </div>
     <div class="field sidecar">
-      <label>标注文件</label>
+      <label>阅读数据（SQLite）</label>
       <code>${sidecar?.path ? escapeHtml(sidecar.path) : "打开文档后显示"}</code>
       <div class="sidecar-actions">
+        <button class="mini-link" data-act="export">导出 .pdfviewer.json</button>
+        <button class="mini-link" data-act="import">从同名文件导入</button>
         <button class="mini-link" data-act="reveal">在文件管理器中显示</button>
         <button class="mini-link" data-act="copy-path">复制路径</button>
       </div>
+    </div>
+    <div class="field plugins">
+      <div class="plugin-head">
+        <label>翻译与查词插件</label>
+        <div class="plugin-head-actions">
+          <button class="mini-link" type="button" data-act="plugin-dir">打开插件目录</button>
+          <button class="mini-link" type="button" data-act="plugin-install">安装插件…</button>
+        </div>
+      </div>
+      <p class="plugin-intro">默认不安装任何插件。启用后，在线翻译只会访问插件声明的域名；离线词典完全在本机查询。</p>
+      <p class="plugin-hint">插件是 .pdfplugin 文件：可在仓库运行 make plugins 生成示例；离线词典优先用 make ecdict（ECDICT，约 9 万词条）。安装后需要打开右侧开关才会生效。</p>
+      <div class="plugin-list" id="plugin-list"></div>
+      <div class="plugin-editor hidden" id="plugin-editor"></div>
     </div>
     <div class="field meta-line">PDF Viewer ${"0.1.0"} · Go + Wails + pdf.js</div>
   `;
@@ -1002,10 +1976,47 @@ function openSettings(): void {
     if (!sidecar?.path) return;
     await navigator.clipboard.writeText(sidecar.path).then(() => toast("路径已复制")).catch(() => toast("复制失败", "error"));
   });
+  body.querySelector('[data-act="export"]')?.addEventListener("click", async () => {
+    const doc = currentDoc;
+    if (!doc) return;
+    try {
+      await flushSave();
+      const path = await api.exportSidecar(doc.token);
+      toast(`已导出到 ${path}`);
+    } catch (e) {
+      toast(`导出失败：${errorText(e)}`, "error");
+    }
+  });
+  body.querySelector('[data-act="import"]')?.addEventListener("click", async () => {
+    const doc = currentDoc;
+    if (!doc) return;
+    try {
+      const path = await api.importSidecar(doc.token);
+      closeSettings?.();
+      toast(`已从 ${path} 导入`);
+      await reloadCurrent();
+    } catch (e) {
+      toast(`导入失败：${errorText(e)}`, "error");
+    }
+  });
 
-  showModal({
+  pluginListEl = body.querySelector("#plugin-list");
+  pluginEditorEl = body.querySelector("#plugin-editor");
+  body.querySelector('[data-act="plugin-install"]')?.addEventListener("click", () => void installPluginFlow());
+  body.querySelector('[data-act="plugin-dir"]')?.addEventListener("click", () => void api.openPluginsDir());
+
+  let closeSettings: (() => void) | null = null;
+  closeSettings = showModal({
     title: "设置",
     body,
+    onClose: () => {
+      if (pendingInstallToken) {
+        void api.cancelPluginInstall(pendingInstallToken).catch(() => undefined);
+        pendingInstallToken = null;
+      }
+      pluginListEl = null;
+      pluginEditorEl = null;
+    },
     actions: [
       { label: "取消", kind: "ghost", onClick: () => undefined },
       {
@@ -1038,6 +2049,10 @@ function openSettings(): void {
       },
     ],
   });
+  void refreshPluginSection();
+  if (focusPlugins) {
+    window.setTimeout(() => body.querySelector(".plugins")?.scrollIntoView({ block: "center" }), 80);
+  }
 }
 
 function escapeHtml(s: string): string {
@@ -1064,7 +2079,8 @@ function showModal(opts: {
   body: HTMLElement;
   actions: ModalAction[];
   focus?: HTMLElement;
-}): void {
+  onClose?: () => void;
+}): () => void {
   modalHost.innerHTML = "";
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
@@ -1088,9 +2104,13 @@ function showModal(opts: {
   const foot = document.createElement("div");
   foot.className = "modal-foot";
 
+  let closed = false;
   const closeModal = () => {
+    if (closed) return;
+    closed = true;
     backdrop.remove();
     document.removeEventListener("keydown", onKey);
+    opts.onClose?.();
   };
 
   for (const action of opts.actions) {
@@ -1121,6 +2141,7 @@ function showModal(opts: {
   backdrop.append(modal);
   modalHost.append(backdrop);
   opts.focus?.focus();
+  return closeModal;
 }
 
 // ---------------------------------------------------------------- toast
@@ -1194,7 +2215,7 @@ function wireUI(): void {
     else closeSidebar();
   });
   $("#sidebar-close").addEventListener("click", closeSidebar);
-  $("#btn-settings").addEventListener("click", openSettings);
+  $("#btn-settings").addEventListener("click", () => openSettings());
 
   document.querySelectorAll<HTMLButtonElement>(".tab").forEach((tab) => {
     tab.addEventListener("click", () => openSidebar(tab.dataset.tab as "thumbs" | "outline" | "notes"));
@@ -1223,11 +2244,11 @@ function wireUI(): void {
 
   viewerEl.addEventListener("scroll", () => {
     window.clearTimeout(scrollSaveTimer);
-    scrollSaveTimer = window.setTimeout(() => scheduleSave(50), 1200);
+    scrollSaveTimer = window.setTimeout(() => scheduleReadingSave(50), 1200);
   });
 
   window.addEventListener("resize", () => {
-    hideSelectionToolbar();
+    clearPendingSelection();
     hideAnnotationPopover();
   });
 
@@ -1242,11 +2263,19 @@ function wireKeyboard(): void {
       (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
 
     if (key === "Escape") {
+      if (ctxMenu) {
+        hideContextMenu();
+        return;
+      }
+      if (transCard && !transCard.classList.contains("hidden")) {
+        hideTransCard();
+        return;
+      }
       if (!searchPanel.classList.contains("hidden")) {
         closeSearch();
         return;
       }
-      hideSelectionToolbar();
+      clearPendingSelection();
       hideAnnotationPopover();
       if (activeTool !== "select") setTool("select");
       return;
@@ -1373,9 +2402,15 @@ function wireKeyboard(): void {
 function wireFileDrop(): void {
   const rt = (window as any).runtime;
   rt?.EventsOn?.("wails:file-drop", (_x: number, _y: number, paths: string[]) => {
-    const pdf = (paths ?? []).find((p) => p.toLowerCase().endsWith(".pdf"));
+    const list = paths ?? [];
+    const plugin = list.find((p) => p.toLowerCase().endsWith(".pdfplugin"));
+    if (plugin) {
+      void installDropped(plugin);
+      return;
+    }
+    const pdf = list.find((p) => p.toLowerCase().endsWith(".pdf"));
     if (pdf) void openPath(pdf);
-    else if (paths?.length) toast("只能打开 PDF 文件", "error");
+    else if (list.length) toast("只能打开 PDF 文件或安装 .pdfplugin 插件", "error");
   });
   window.addEventListener("dragover", (e) => e.preventDefault());
   window.addEventListener("drop", (e) => e.preventDefault());

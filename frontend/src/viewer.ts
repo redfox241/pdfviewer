@@ -319,6 +319,14 @@ export class Viewer {
   }
 
   private applyPagesWidth(): void {
+    // Fit modes must never size the column from a stale page width: keep it at
+    // exactly the scrollport width so it stays centred when the window grows
+    // (e.g. after a title-bar double-click maximise). Only custom zooms need an
+    // explicit width so that horizontal scrolling has a real extent.
+    if (this.zoomMode === "fit-width" || this.zoomMode === "fit-page") {
+      this.pagesEl.style.width = "100%";
+      return;
+    }
     let maxW = 0;
     for (const pv of this.pageViews.values()) {
       const s = this.displaySize(pv.meta);
@@ -346,13 +354,25 @@ export class Viewer {
   }
 
   private computeFit(mode: "fit-width" | "fit-page"): number {
-    const meta = this.metas[Math.max(0, this.currentPage - 1)] ?? this.metas[0];
-    if (!meta) return 1;
+    if (!this.metas.length) return 1;
+    // Pages in real-world scans often have slightly different CropBoxes, so
+    // fit against the largest page. Using the current page can leave the pages
+    // container a few pixels wider than the viewport, which shows up as a
+    // horizontal scrollbar and off-centre content after resizing/maximising.
+    const swap = normRot(this.rotationDelta) % 180 !== 0;
+    let maxW = 1;
+    let maxH = 1;
+    for (const m of this.metas) {
+      const w = swap ? m.baseH : m.baseW;
+      const h = swap ? m.baseW : m.baseH;
+      if (w > maxW) maxW = w;
+      if (h > maxH) maxH = h;
+    }
     const availW = Math.max(200, this.scroller.clientWidth - SIDE_PAD * 2);
     const availH = Math.max(200, this.scroller.clientHeight - 40);
-    let s = availW / meta.baseW;
+    let s = availW / maxW;
     if (mode === "fit-page") {
-      s = Math.min(s, availH / meta.baseH);
+      s = Math.min(s, availH / maxH);
     }
     return clamp(s, MIN_SCALE, MAX_SCALE);
   }
@@ -406,8 +426,9 @@ export class Viewer {
   // ------------------------------------------------------------------ pages
 
   private displaySize(meta: PageMeta): { w: number; h: number } {
-    const rot = normRot(meta.intrinsicRot + this.rotationDelta);
-    const swap = rot % 180 !== 0;
+    // baseW/baseH come from getViewport({ scale: 1 }), which already includes
+    // the page's intrinsic /Rotate. Only an extra user rotation swaps them.
+    const swap = normRot(this.rotationDelta) % 180 !== 0;
     return swap
       ? { w: meta.baseH * this.scale, h: meta.baseW * this.scale }
       : { w: meta.baseW * this.scale, h: meta.baseH * this.scale };
@@ -601,6 +622,58 @@ export class Viewer {
     } catch {
       return "";
     }
+  }
+
+  // Resolve the word under a point using PDF.js text items rather than the
+  // browser's live DOM selection. PDF text layers split or merge words in
+  // ways that make double-click selection return a fragment or a neighbour.
+  wordAtPoint(pageNum: number, nx: number, ny: number): string | null {
+    const pv = this.pageViews.get(pageNum);
+    const cache = this.textCache.get(pageNum);
+    if (!pv || !pv.page || !cache) return null;
+    const totalRot = normRot(pv.meta.intrinsicRot + this.rotationDelta);
+    const viewport = pv.page.getViewport({ scale: 1, rotation: totalRot });
+    const x = nx * viewport.width;
+    const y = ny * viewport.height;
+    let best: string | null = null;
+    let bestDist = Infinity;
+    for (const item of cache.items) {
+      const str = typeof item.str === "string" ? item.str : "";
+      if (!str.trim()) continue;
+      const tr = pdfjsLib.Util.transform(viewport.transform, item.transform);
+      // Rotated/skewed items are hard to hit-test; fall back to DOM selection.
+      if (Math.abs(tr[1]) > 0.01 || Math.abs(tr[2]) > 0.01) continue;
+      const left = tr[4];
+      const baseline = tr[5];
+      const width = Math.max(1, item.width || 0);
+      const height = Math.max(1, item.height || 0);
+      const top = baseline - height;
+      const bottom = baseline + height * 0.25;
+      if (x < left - 2 || x > left + width + 2 || y < top - 2 || y > bottom + 2) continue;
+      const dist = Math.abs(x - (left + width / 2)) + Math.abs(y - (top + bottom) / 2);
+      if (dist >= bestDist) continue;
+      const rel = clamp((x - left) / width, 0, 0.9999);
+      let idx = Math.floor(rel * str.length);
+      const isSpace = (c: string | undefined): boolean => !c || /\s/.test(c);
+      if (isSpace(str[idx])) {
+        let l = idx;
+        while (l > 0 && isSpace(str[l - 1])) l--;
+        let r = idx;
+        while (r < str.length && isSpace(str[r])) r++;
+        idx = l > 0 ? l - 1 : r;
+      }
+      let a = idx;
+      let b = idx + 1;
+      while (a > 0 && !isSpace(str[a - 1])) a--;
+      while (b < str.length && !isSpace(str[b])) b++;
+      const word = str
+        .slice(a, b)
+        .replace(/^[^A-Za-z0-9'’\-]+|[^A-Za-z0-9'’\-]+$/g, "");
+      if (!word) continue;
+      best = word;
+      bestDist = dist;
+    }
+    return best;
   }
 
   // ---------------------------------------------------------------- scaling
@@ -942,6 +1015,16 @@ export class Viewer {
       g.dataset.id = ann.id;
 
       if (ann.quads?.length) {
+        // One highlight annotation is painted as a single composited layer.
+        // Line boxes from a wrapped selection often overlap by a pixel or two;
+        // painting each quad with its own fill-opacity makes those seams
+        // darker. With group opacity the quads union first, then fade once.
+        const highlightLayer =
+          ann.type === "highlight" ? document.createElementNS(NS, "g") : null;
+        if (highlightLayer) {
+          highlightLayer.setAttribute("class", "ann-highlight");
+          highlightLayer.setAttribute("opacity", String(ann.opacity ?? 0.38));
+        }
         for (const q of ann.quads) {
           const dq = rotateQuad(q, delta);
           const x = dq.x * w;
@@ -957,13 +1040,15 @@ export class Viewer {
             r.setAttribute("height", String(qh));
             r.setAttribute("rx", "2");
             r.setAttribute("fill", ann.color);
-            r.setAttribute("fill-opacity", String(ann.type === "box" ? ann.opacity ?? 0.14 : ann.opacity ?? 0.38));
-            if (ann.type === "box") {
+            if (ann.type === "highlight") {
+              r.setAttribute("fill-opacity", "1");
+            } else {
+              r.setAttribute("fill-opacity", String(ann.opacity ?? 0.14));
               r.setAttribute("stroke", ann.color);
               r.setAttribute("stroke-width", "1.5");
               r.setAttribute("stroke-dasharray", "4 3");
             }
-            g.append(r);
+            (highlightLayer ?? g).append(r);
           } else if (ann.type === "redact") {
             const r = document.createElementNS(NS, "rect");
             r.setAttribute("x", String(x));
@@ -985,6 +1070,7 @@ export class Viewer {
             g.append(r);
           }
         }
+        if (highlightLayer) g.append(highlightLayer);
       }
 
       if (ann.type === "ink" || ann.type === "redact") {
@@ -1143,17 +1229,15 @@ export class Viewer {
     this.events.onAnnotationSelect(ann, anchor);
   }
 
-  collectSelection(): void {
+  readSelection(): SelectionPayload | null {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || !sel.rangeCount) {
-      this.events.onSelection(null);
-      return;
+      return null;
     }
     const range = sel.getRangeAt(0);
     const rects = [...range.getClientRects()];
     if (!rects.length) {
-      this.events.onSelection(null);
-      return;
+      return null;
     }
 
     const byPage = new Map<number, { rects: Quad[]; text: string }>();
@@ -1176,11 +1260,11 @@ export class Viewer {
       byPage.set(num, entry);
     }
     if (!byPage.size) {
-      this.events.onSelection(null);
-      return;
+      return null;
     }
 
     const text = sel.toString().replace(/\s+\n/g, "\n").trim();
+    if (!text) return null;
     const groups: SelectionGroup[] = [];
     for (const [page, entry] of byPage) {
       const merged = mergeQuads(entry.rects);
@@ -1189,21 +1273,28 @@ export class Viewer {
       groups.push({ page, quads, text: groups.length === 0 ? text : "" });
     }
     if (!groups.length) {
-      this.events.onSelection(null);
-      return;
+      return null;
     }
 
-    const payload: SelectionPayload = {
+    return {
       text,
       page: groups[0]!.page,
       quads: groups[0]!.quads,
       groups,
       rect: range.getBoundingClientRect(),
     };
+  }
+
+  collectSelection(): void {
+    const payload = this.readSelection();
+    if (!payload) {
+      this.events.onSelection(null);
+      return;
+    }
 
     if (this.tool === "highlight" || this.tool === "underline" || this.tool === "strikeout") {
       this.annotateSelection(payload, this.tool, this.toolColor);
-      sel.removeAllRanges();
+      window.getSelection()?.removeAllRanges();
       this.events.onSelection(null);
       return;
     }

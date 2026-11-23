@@ -1,0 +1,11 @@
+{
+  "id": "translator-deepl",
+  "name": "DeepL 翻译（示例）",
+  "version": "1.0.0",
+  "kind": "translator",
+  "description": "使用 DeepL API Free。若使用 Pro 账号，请把 endpoint 改为 https://api.deepl.com/v2/translate。",
+  "author": "PDF Viewer",
+  "provider": "deepl",
+  "endpoint": "https://api-free.deepl.com/v2/translate",
+  "targetLang": "ZH-HANS"
+}

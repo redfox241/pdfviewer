@@ -1,6 +1,6 @@
 # PDF Viewer
 
-一个本地优先的跨平台 PDF 阅读器：**Go + Wails + pdf.js**，一套代码构建 macOS 与 Windows 版本。打开即读，选中句子就能留下颜色，标注与阅读进度保存在文档旁边，原 PDF 永不被修改。
+一个本地优先的跨平台 PDF 阅读器：**Go + Wails + pdf.js**，一套代码构建 macOS 与 Windows 版本。打开即读，选中句子就能留下颜色；标注与阅读进度保存在本地 SQLite 库，可一键导出为旁挂 JSON，原 PDF 永不被修改。
 
 ## 功能
 
@@ -10,18 +10,19 @@
 - **阅读进度**：停留自动标记已读，也可手动标记；顶部进度条、缩略图勾选、最近列表百分比
 - **导航**：缩略图侧栏、PDF 大纲、标注列表
 - **搜索**：文档内全文搜索、结果列表、上下跳转、区分大小写
-- **本地优先**：完全离线、无账号、无遥测；标注写入旁挂 JSON，原文件不变
+- **翻译与查词**：选中文字 → 右键 →「翻译为中文」或「查词」；整句翻译后会按单词列出音标、词性和全部释义，在线翻译（OpenAI 兼容 / DeepL / Google / 百度 / 有道）与离线词典都以可选插件提供，默认不安装
+- **本地优先**：默认完全离线、无账号、无遥测；仅在你安装并启用在线翻译插件后，才会按插件声明的域名发起请求。阅读数据存本地 SQLite（WAL），旁挂 JSON 只用于导出/交换，原文件不变
 
 ## 技术栈
 
 | 层 | 选型 |
 |----|------|
 | 桌面框架 | Wails v2（WKWebView / WebView2，无 cgo） |
-| 后端 | Go 1.23+，负责窗口、文件流（支持 Range）、标注存储、设置、最近文件 |
+| 后端 | Go 1.23+，负责窗口、文件流（支持 Range）、SQLite 持久化、设置、最近文件 |
 | 渲染 | pdf.js 4.10.38（文本层 + canvas，兼容 Safari 16.4+ WebView） |
 | 前端 | TypeScript + Vite，原生 DOM 组件 |
 
-详细设计见 [docs/DESIGN.md](docs/DESIGN.md)。
+详细设计见 [docs/DESIGN.md](docs/DESIGN.md)。PDF 格式科普：[网页版](docs/pdf-format-guide.html) · [PDF 版](docs/pdf-format-guide.pdf)。
 
 ## 目录结构
 
@@ -30,10 +31,13 @@
 ├── main.go                 # Wails 入口与窗口配置
 ├── app.go                  # 绑定给前端的 Go 接口
 ├── internal/
-│   ├── annot/              # sidecar 读写、校验、指纹、原子写
+│   ├── notestore/          # SQLite 阅读数据（WAL，增量写）
+│   ├── annot/              # 便携 JSON 格式、校验、指纹、导入/导出
+│   ├── plugin/             # 翻译 / 离线词典插件（安装、校验、HTTP、SQLite）
 │   ├── library/            # 最近文件
 │   ├── pdfstream/          # 本地 PDF Range 流
 │   └── settings/           # 设置
+├── plugins/                # 可打包的示例插件源码（默认不安装）
 ├── frontend/
 │   ├── src/viewer.ts       # pdf.js 封装、虚拟滚动、缩放、搜索、工具
 │   ├── src/main.ts         # 应用装配与 UI 交互
@@ -70,7 +74,9 @@ make all                 # macOS 通用包 + Windows x64
 make dev                 # 热重载开发
 make test                # go test ./...
 make doctor              # 检查构建环境
-make clean               # 删除 build/bin 和 frontend/dist
+make plugins             # 打包 plugins/* 为 build/plugins/*.pdfplugin
+make ecdict              # 下载并构建 ECDICT 高精度离线词典（约 54 MB 下载，9 万词条）
+make clean               # 删除 build/bin、build/plugins 和 frontend/dist
 
 make mac CLEAN=1         # 构建前执行 wails build -clean
 ```
@@ -111,11 +117,11 @@ wails build -platform windows/amd64 -nsis
 ## 使用
 
 1. 点击「打开」、把 PDF 拖进窗口，或从「最近阅读」继续。
-2. 选中文字后：
-   - 点击浮动工具条上的颜色 → 高亮
-   - 点击下划线 / 删除线 → 划线
-   - 点击复制 → 复制原文
-3. 左侧工具条可切换记号笔、涂改带、区域框选、便签、橡皮擦。
+2. 选中文字后 → 右键：
+   - 选颜色后点「高亮 / 下划线 / 删除线」
+   - 「复制」复制原文
+   - 「翻译为中文」或「查词」（需先安装并启用插件）
+3. 顶部标注工具栏可切换选择、高亮、下划线、删除线、记号笔、涂改带、区域框选、便签、橡皮擦。
 4. 页面停留 3 秒自动标记已读（可在设置中关闭）；`R` 手动切换本页已读。
 5. `⌘/Ctrl + F` 搜索，`Enter` / `Shift + Enter` 在结果间跳转。
 
@@ -133,14 +139,41 @@ wails build -platform windows/amd64 -nsis
 | 撤销 / 重做 | ⌘Z / ⇧⌘Z | Ctrl+Z / Ctrl+Y |
 | 标记本页已读 | R | R |
 
+## 翻译与查词插件
+
+翻译是可选能力，默认不安装任何插件。插件是声明式的 `.pdfplugin` 包，不执行代码：
+
+- **在线翻译**：内置 OpenAI 兼容、DeepL、Google、百度、有道五种请求适配器；百度需要 AppID 与 API Key，有道需要 AppKey 与 AppSecret。启用后只访问 manifest 声明的域名，15 秒超时，译文有内存缓存。
+- **句子单词详解**：整句翻译完成后，使用已启用的离线词典逐词显示音标、词性和多条中文释义；变形词会显示原型，未收录的词会单独标注。
+- **离线词典**：读取插件自带的 SQLite 词表，选中单词/短语时查词，不联网。
+- 安装、开关、API Key 和卸载都在「设置 → 翻译与查词插件」中完成，立即生效。
+- 没有启用插件时，右键菜单仍显示入口并引导到设置；非英文内容会置灰。
+
+示例插件源码在 `plugins/`，打包后安装：
+
+```bash
+./scripts/pack-plugins.sh
+# 设置 → 翻译与查词插件 → 安装插件… → build/plugins/dictionary-sample.pdfplugin
+```
+
+Windows PowerShell：
+
+```powershell
+.\scripts\pack-plugins.ps1
+```
+
+离线词典推荐用 ECDICT：运行 `make ecdict` 会下载并构建约 6 万基础词、9 万词条的精简词典，含音标、词性、多义项和常见变形，准确度明显高于 FreeDict。FreeDict 仍保留为来源清晰、体积小的轻量选项，但它是自动生成的词表，释义质量有限。完整 manifest 格式、词典 schema、安全边界和自制流程见 [docs/PLUGINS.md](docs/PLUGINS.md)。
+
 ## 数据存储
 
-- 标注与阅读进度：默认写入与 PDF 同目录的 `报告.pdf.pdfviewer.json`；目录不可写时自动改存应用数据目录。
-  - macOS：`~/Library/Application Support/PDFViewer/notes/`
-  - Windows：`%APPDATA%\PDFViewer\notes\`
-- 设置与最近文件：`~/Library/Application Support/PDFViewer/`、`%APPDATA%\PDFViewer\`
-- 写入使用「临时文件 + rename」原子替换，并保留一份 `.bak`。
-- 通过文件大小、mtime 与前 1 MB 哈希检测文档是否被替换；不匹配时提示标注可能偏移。
+- 阅读进度与标注：本地 SQLite（WAL），默认位于
+  - macOS：`~/Library/Application Support/PDFViewer/library.db`
+  - Windows：`%APPDATA%\PDFViewer\library.db`
+- 文档以内容指纹（大小 + 首尾各 1 MiB 哈希）识别，移动/重命名 PDF 不丢数据。
+- 旁挂 `报告.pdf.pdfviewer.json` 只用于**显式导出/导入**；旧版 sidecar 会在首次打开时自动导入一次，之后不再回写、不生成 `.bak`。
+- 设置与最近文件：`PDFViewer/settings.json`、`PDFViewer/recent.json`。
+- 插件与密钥：`PDFViewer/plugins/<id>/`；API Key 明文保存在插件的 `.config.json`（权限 `0600`），卸载插件会一并删除。
+- 设置面板提供「导出 .pdfviewer.json」「从同名文件导入」。
 
 ## 测试
 
@@ -148,7 +181,7 @@ wails build -platform windows/amd64 -nsis
 go test ./...
 ```
 
-前端交互（打开、选择、高亮、撤销、搜索跳转、缩略图、夜间、手绘、橡皮擦、便签、已读进度、重开恢复、旋转）已在 Chromium 中做过端到端验证。
+后端覆盖 SQLite 增量读写、阅读状态 round-trip、标注 reconcile、旧 sidecar 迁移、指纹稳定性；前端交互（打开、翻页保存、标注保存、导出/导入入口）已在 Chromium + mock 绑定下验证，并用隔离 HOME 运行真实 Wails 应用确认数据库落盘、旧 sidecar 自动导入且不再生成 `.bak`。
 
 ## 已知限制（v0.1）
 
@@ -157,6 +190,7 @@ go test ./...
 - 标注不会写回原 PDF（设计如此）；「导出带标注的 PDF」在 v1.1。
 - 文件关联（双击 PDF 打开）与多标签页在 v1.1。
 - 旋转角度不跨会话保存。
+- 尚未启用单实例锁：同一文档被两个窗口同时编辑时，后保存的一方可能覆盖前者。
 - 标注暂不支持拖动 / 缩放，搜索暂不支持整词匹配（均在 v1.1）。
 
 ## Roadmap

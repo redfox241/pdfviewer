@@ -1,0 +1,11 @@
+{
+  "id": "translator-openai-compatible",
+  "name": "OpenAI 兼容翻译（示例）",
+  "version": "1.0.0",
+  "kind": "translator",
+  "description": "示例配置：DeepSeek。任何兼容 /chat/completions 的服务都可以按此格式打包，包括 Kimi、Qwen、OpenAI 和本机 Ollama。",
+  "author": "PDF Viewer",
+  "provider": "openai",
+  "endpoint": "https://api.deepseek.com/chat/completions",
+  "model": "deepseek-chat"
+}

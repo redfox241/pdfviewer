@@ -82,6 +82,10 @@
         <path d="M4.5 7h15M9 7V4.8h6V7M6.5 7l.8 12.2a1 1 0 0 0 1 .8h7.4a1 1 0 0 0 1-.8L17.5 7" />
       </symbol>
       <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path d="M19.5 9A8 8 0 1 0 20 14" />
+        <path d="M20 4v5h-5" />
+      </symbol>
       <symbol id="i-check" viewBox="0 0 24 24"><path d="M4.5 12.5l5 5 10-11" /></symbol>
       <symbol id="i-fit-width" viewBox="0 0 24 24">
         <path d="M3.5 6.5v11M20.5 6.5v11M7 9.5L4 12l3 2.5M17 9.5l3 2.5-3 2.5" />
@@ -161,6 +165,38 @@
         </div>
       </header>
 
+      <div id="tool-palette" class="tool-palette hidden">
+        <button class="tool-btn" data-tool="select" title="选择 (V)">
+          <svg class="icon"><use href="#i-cursor" /></svg>
+        </button>
+        <button class="tool-btn" data-tool="highlight" title="高亮 (H)">
+          <svg class="icon"><use href="#i-highlighter" /></svg>
+        </button>
+        <button class="tool-btn" data-tool="underline" title="下划线 (U)">
+          <svg class="icon"><use href="#i-underline" /></svg>
+        </button>
+        <button class="tool-btn" data-tool="strikeout" title="删除线 (S)">
+          <svg class="icon"><use href="#i-strike" /></svg>
+        </button>
+        <button class="tool-btn" data-tool="ink" title="记号笔 (P)">
+          <svg class="icon"><use href="#i-pen" /></svg>
+        </button>
+        <button class="tool-btn" data-tool="redact" title="涂改带">
+          <svg class="icon redact-icon"><use href="#i-pen" /></svg>
+        </button>
+        <button class="tool-btn" data-tool="box" title="区域框选">
+          <svg class="icon"><use href="#i-box" /></svg>
+        </button>
+        <button class="tool-btn" data-tool="note" title="便签 (N)">
+          <svg class="icon"><use href="#i-note" /></svg>
+        </button>
+        <button class="tool-btn" data-tool="eraser" title="橡皮擦 (E)">
+          <svg class="icon"><use href="#i-eraser" /></svg>
+        </button>
+        <div class="palette-divider"></div>
+        <div id="palette-colors" class="palette-colors"></div>
+      </div>
+
       <div class="progress-line"><i id="progress-fill"></i></div>
 
       <div class="workspace">
@@ -199,38 +235,6 @@
           <div id="loading" class="loading hidden">
             <span class="spinner"></span>
             <span>正在打开…</span>
-          </div>
-
-          <div id="tool-palette" class="tool-palette hidden">
-            <button class="tool-btn" data-tool="select" title="选择 (V)">
-              <svg class="icon"><use href="#i-cursor" /></svg>
-            </button>
-            <button class="tool-btn" data-tool="highlight" title="高亮 (H)">
-              <svg class="icon"><use href="#i-highlighter" /></svg>
-            </button>
-            <button class="tool-btn" data-tool="underline" title="下划线 (U)">
-              <svg class="icon"><use href="#i-underline" /></svg>
-            </button>
-            <button class="tool-btn" data-tool="strikeout" title="删除线 (S)">
-              <svg class="icon"><use href="#i-strike" /></svg>
-            </button>
-            <button class="tool-btn" data-tool="ink" title="记号笔 (P)">
-              <svg class="icon"><use href="#i-pen" /></svg>
-            </button>
-            <button class="tool-btn" data-tool="redact" title="涂改带">
-              <svg class="icon redact-icon"><use href="#i-pen" /></svg>
-            </button>
-            <button class="tool-btn" data-tool="box" title="区域框选">
-              <svg class="icon"><use href="#i-box" /></svg>
-            </button>
-            <button class="tool-btn" data-tool="note" title="便签 (N)">
-              <svg class="icon"><use href="#i-note" /></svg>
-            </button>
-            <button class="tool-btn" data-tool="eraser" title="橡皮擦 (E)">
-              <svg class="icon"><use href="#i-eraser" /></svg>
-            </button>
-            <div class="palette-divider"></div>
-            <div id="palette-colors" class="palette-colors"></div>
           </div>
 
           <div id="zoom-badge" class="zoom-badge hidden">100%</div>

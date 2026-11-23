@@ -4,7 +4,7 @@ SHELL := /bin/bash
 # 用法: make mac CLEAN=1  ->  ./scripts/build.sh mac --clean
 CLEAN_FLAG := $(if $(filter 1 true yes on,$(CLEAN)),--clean,)
 
-.PHONY: help dev mac macos mac-amd64 mac-arm64 win windows win-arm64 win-installer all test doctor clean
+.PHONY: help dev mac macos mac-amd64 mac-arm64 win windows win-arm64 win-installer all test doctor plugins ecdict clean
 
 help:
 	@echo "用法: make <target>"
@@ -19,7 +19,9 @@ help:
 	@echo "  dev               wails dev"
 	@echo "  test              go test ./..."
 	@echo "  doctor            wails doctor"
-	@echo "  clean             删除 build/bin 和 frontend/dist"
+	@echo "  plugins           打包 plugins/* 为 build/plugins/*.pdfplugin"
+	@echo "  ecdict            下载并构建高精度离线词典（ECDICT，约 54 MB 下载，9 万词条）"
+	@echo "  clean             删除 build/bin、build/plugins 和 frontend/dist"
 	@echo ""
 	@echo "  CLEAN=1           传给 wails build 的 -clean"
 	@echo "  WAILS=/path       指定 Wails CLI"
@@ -56,5 +58,12 @@ test:
 doctor:
 	@./scripts/build.sh doctor
 
+plugins:
+	@./scripts/pack-plugins.sh
+
+ecdict:
+	@./scripts/build-ecdict-pack.sh
+
 clean:
 	@./scripts/build.sh clean
+	@rm -rf build/plugins

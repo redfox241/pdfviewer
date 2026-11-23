@@ -1,0 +1,11 @@
+{
+  "id": "translator-baidu",
+  "name": "百度翻译（通用）",
+  "version": "1.0.0",
+  "kind": "translator",
+  "description": "百度翻译开放平台通用文本翻译。需要 AppID 与密钥；启用时填写凭据。",
+  "author": "PDF Viewer",
+  "provider": "baidu",
+  "endpoint": "https://fanyi-api.baidu.com/api/trans/vip/translate",
+  "targetLang": "zh"
+}

@@ -1,0 +1,11 @@
+{
+  "id": "translator-google",
+  "name": "Google 翻译（示例）",
+  "version": "1.0.0",
+  "kind": "translator",
+  "description": "使用免密钥的 Google 翻译网页端点。该端点没有服务等级保证，可能随时失效；长期使用建议改用 DeepL 或 OpenAI 兼容服务。",
+  "author": "PDF Viewer",
+  "provider": "google",
+  "endpoint": "https://translate.googleapis.com/translate_a/single",
+  "targetLang": "zh-CN"
+}

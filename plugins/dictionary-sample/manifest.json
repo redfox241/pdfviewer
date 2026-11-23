@@ -1,0 +1,9 @@
+{
+  "id": "dictionary-sample",
+  "name": "示例离线词典",
+  "version": "1.0.0",
+  "kind": "dictionary",
+  "description": "仅用于演示与测试的常用英汉词表（约 100 条，含变形），不是完整词典。可用 scripts/build-dict.py 把自己的 CSV 转换为同结构插件。",
+  "author": "PDF Viewer",
+  "data": "dict.sqlite"
+}

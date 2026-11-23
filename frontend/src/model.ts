@@ -20,6 +20,66 @@ export type Tool =
 
 export type ZoomMode = "custom" | "fit-width" | "fit-page" | "actual";
 
+export type PluginKind = "translator" | "dictionary";
+
+export interface PluginInfo {
+  id: string;
+  name: string;
+  version: string;
+  kind: PluginKind;
+  description: string;
+  author: string;
+  homepage: string;
+  source: string;
+  license: string;
+  provider: string;
+  endpoint: string;
+  model: string;
+  targetLang: string;
+  host: string;
+  enabled: boolean;
+  default: boolean;
+  hasKey: boolean;
+  requiresKey: boolean;
+  hasAppId: boolean;
+  requiresAppId: boolean;
+  size: number;
+}
+
+export interface InstallCandidate {
+  token: string;
+  id: string;
+  name: string;
+  version: string;
+  kind: PluginKind;
+  existing: boolean;
+  existingVersion: string;
+}
+
+export interface TranslationResult {
+  text: string;
+  pluginId: string;
+  pluginName: string;
+  model: string;
+  targetLang: string;
+  cached: boolean;
+}
+
+export interface DictEntry {
+  pos: string;
+  translation: string;
+}
+
+export interface DictResult {
+  word: string;
+  phonetic: string;
+  lemma: string;
+  entries: DictEntry[];
+  found: boolean;
+  pluginId: string;
+  pluginName: string;
+}
+
 export interface Quad {
   x: number;
   y: number;

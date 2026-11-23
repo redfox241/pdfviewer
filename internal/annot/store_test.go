@@ -2,11 +2,13 @@ package annot
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
+	"time"
 )
 
 func writePDF(t *testing.T, dir string) string {
@@ -45,54 +47,6 @@ func payload(pages int, rounds int) []byte {
 	return raw
 }
 
-func TestSaveLoadRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	pdf := writePDF(t, dir)
-	fallback := filepath.Join(dir, "support")
-
-	raw := payload(10, 2)
-	path, err := Save(pdf, fallback, raw)
-	if err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	if want := AdjacentPath(pdf); path != want {
-		t.Fatalf("sidecar path = %q, want %q", path, want)
-	}
-
-	res, err := Load(pdf, fallback)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if res.Data == "" {
-		t.Fatal("expected sidecar data")
-	}
-	if !res.Portable {
-		t.Fatal("expected portable sidecar")
-	}
-	if res.Warning != "" {
-		t.Fatalf("unexpected warning: %s", res.Warning)
-	}
-}
-
-func TestLoadMissingReturnsTarget(t *testing.T) {
-	dir := t.TempDir()
-	pdf := writePDF(t, dir)
-
-	res, err := Load(pdf, filepath.Join(dir, "support"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Data != "" {
-		t.Fatal("expected empty data")
-	}
-	if res.Path == "" || !res.Portable {
-		t.Fatalf("unexpected target: %+v", res)
-	}
-	if res.Fingerprint == "" {
-		t.Fatal("expected fingerprint")
-	}
-}
-
 func TestValidate(t *testing.T) {
 	if err := Validate(payload(3, 1)); err != nil {
 		t.Fatalf("valid payload rejected: %v", err)
@@ -112,85 +66,29 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestBackupKept(t *testing.T) {
+func TestReadLegacyCentral(t *testing.T) {
 	dir := t.TempDir()
 	pdf := writePDF(t, dir)
-	fallback := filepath.Join(dir, "support")
-
-	first := payload(3, 1)
-	if _, err := Save(pdf, fallback, first); err != nil {
-		t.Fatal(err)
-	}
-	second := payload(3, 2)
-	path, err := Save(pdf, fallback, second)
+	fp, err := legacyFingerprint(pdf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	backup, err := os.ReadFile(path + ".bak")
-	if err != nil {
-		t.Fatalf("backup missing: %v", err)
-	}
-	if !bytes.Equal(backup, first) {
-		t.Fatal("backup does not hold previous revision")
-	}
-}
-
-func TestReadOnlyDirectoryFallsBack(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission bits are not enforced the same way on Windows")
-	}
-	if os.Getenv("USER") == "root" {
-		t.Skip("running as root, permissions are not enforced")
-	}
-	dir := t.TempDir()
-	pdfDir := filepath.Join(dir, "readonly")
-	if err := os.Mkdir(pdfDir, 0o755); err != nil {
+	sum := sha256.Sum256([]byte(fp))
+	notes := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(notes, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pdf := writePDF(t, pdfDir)
-	fallback := filepath.Join(dir, "support")
-
-	if err := os.Chmod(pdfDir, 0o555); err != nil {
+	want := payload(4, 1)
+	path := filepath.Join(notes, hex.EncodeToString(sum[:16])+".json")
+	if err := os.WriteFile(path, want, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(pdfDir, 0o755) })
-
-	path, err := Save(pdf, fallback, payload(2, 1))
-	if err != nil {
-		t.Fatalf("save: %v", err)
+	raw, ok, err := ReadLegacyCentral(pdf, dir)
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
 	}
-	if filepath.Dir(path) != filepath.Join(fallback, "notes") {
-		t.Fatalf("expected central fallback, got %q", path)
-	}
-
-	res, err := Load(pdf, fallback)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Portable {
-		t.Fatal("central sidecar should not be portable")
-	}
-	if res.Data == "" {
-		t.Fatal("expected fallback data")
-	}
-}
-
-func TestOriginalDocumentUntouched(t *testing.T) {
-	dir := t.TempDir()
-	pdf := writePDF(t, dir)
-	before, err := os.ReadFile(pdf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Save(pdf, filepath.Join(dir, "support"), payload(5, 1)); err != nil {
-		t.Fatal(err)
-	}
-	after, err := os.ReadFile(pdf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(before, after) {
-		t.Fatal("PDF was modified")
+	if !bytes.Equal(raw, want) {
+		t.Fatal("legacy sidecar mismatch")
 	}
 }
 
@@ -210,5 +108,58 @@ func TestFingerprintDetectsReplacement(t *testing.T) {
 	}
 	if fp1 == fp2 {
 		t.Fatal("fingerprint did not change")
+	}
+}
+
+func TestFingerprintIgnoresMTime(t *testing.T) {
+	dir := t.TempDir()
+	pdf := writePDF(t, dir)
+	fp1, err := Fingerprint(pdf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(48 * time.Hour)
+	if err := os.Chtimes(pdf, later, later); err != nil {
+		t.Fatal(err)
+	}
+	fp2, err := Fingerprint(pdf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp1 != fp2 {
+		t.Fatalf("mtime change altered fingerprint: %q -> %q", fp1, fp2)
+	}
+}
+
+func TestFingerprintStableForLargeFiles(t *testing.T) {
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "big.pdf")
+	raw := bytes.Repeat([]byte("0123456789abcdef"), 200_000) // ~3 MiB
+	if err := os.WriteFile(pdf, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fp1, err := Fingerprint(pdf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp2, err := Fingerprint(pdf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp1 != fp2 {
+		t.Fatal("fingerprint is not stable")
+	}
+	// Flip a byte in the middle: the sampled head/tail stays the same, which is
+	// the documented trade-off for fast identification.
+	raw[len(raw)/2] ^= 0xff
+	if err := os.WriteFile(pdf, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fp3, err := Fingerprint(pdf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp3 != fp1 {
+		t.Fatal("expected sampled fingerprint to ignore the middle byte")
 	}
 }

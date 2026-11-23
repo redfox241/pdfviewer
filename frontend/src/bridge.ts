@@ -1,4 +1,13 @@
-import type { DocInfo, RecentEntry, Settings, SidecarLoad } from "./model";
+import type {
+  DictResult,
+  DocInfo,
+  InstallCandidate,
+  PluginInfo,
+  RecentEntry,
+  Settings,
+  SidecarLoad,
+  TranslationResult,
+} from "./model";
 
 type Binding = { [key: string]: (...args: unknown[]) => Promise<unknown> };
 
@@ -21,7 +30,13 @@ export const api = {
   openDialog: () => call<DocInfo>("OpenDialog"),
   openDocument: (path: string) => call<DocInfo>("OpenDocument", path),
   loadSidecar: (token: string) => call<SidecarLoad>("LoadSidecar", token),
+  saveReading: (token: string, reading: string, pages: number) =>
+    call<void>("SaveReading", token, reading, pages),
+  saveAnnotations: (token: string, annotations: string) =>
+    call<void>("SaveAnnotations", token, annotations),
   saveSidecar: (token: string, data: string) => call<string>("SaveSidecar", token, data),
+  exportSidecar: (token: string) => call<string>("ExportSidecar", token),
+  importSidecar: (token: string) => call<string>("ImportSidecar", token),
   readDocumentBase64: (token: string) => call<string>("ReadDocumentBase64", token),
   closeDocument: (token: string) => call<void>("CloseDocument", token),
   updateProgress: (token: string, pages: number, progress: number) =>
@@ -37,6 +52,24 @@ export const api = {
   configDir: () => call<string>("ConfigDir"),
   reveal: (path: string) => call<void>("RevealFile", path),
   version: () => call<string>("Version"),
+  plugins: () => call<PluginInfo[]>("Plugins"),
+  pickPlugin: () => call<InstallCandidate | null>("PickPlugin"),
+  stagePlugin: (path: string) => call<InstallCandidate | null>("StagePlugin", path),
+  installPlugin: (token: string) => call<PluginInfo[]>("InstallPlugin", token),
+  cancelPluginInstall: (token: string) => call<void>("CancelPluginInstall", token),
+  uninstallPlugin: (id: string) => call<PluginInfo[]>("UninstallPlugin", id),
+  setPluginEnabled: (id: string, enabled: boolean) =>
+    call<PluginInfo[]>("SetPluginEnabled", id, enabled),
+  setPluginDefault: (id: string) => call<PluginInfo[]>("SetPluginDefault", id),
+  setPluginKey: (id: string, key: string) => call<PluginInfo[]>("SetPluginKey", id, key),
+  setPluginCredentials: (id: string, appID: string, key: string) =>
+    call<PluginInfo[]>("SetPluginCredentials", id, appID, key),
+  translate: (reqID: string, id: string, text: string) =>
+    call<TranslationResult>("Translate", reqID, id, text),
+  cancelTranslate: (reqID: string) => call<void>("CancelTranslate", reqID),
+  lookupWord: (id: string, word: string) => call<DictResult>("LookupWord", id, word),
+  lookupWords: (id: string, text: string) => call<DictResult[]>("LookupWords", id, text),
+  openPluginsDir: () => call<void>("OpenPluginsDir"),
 };
 
 export function errorText(e: unknown): string {

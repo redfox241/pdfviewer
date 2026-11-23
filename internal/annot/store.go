@@ -1,6 +1,7 @@
-// Package annot stores reading state and annotations in a sidecar JSON file
-// next to the document, falling back to the application support directory for
-// read-only locations. The original PDF is never modified.
+// Package annot defines the portable .pdfviewer.json format (schema v1) and
+// helpers for validating and exporting it. Reading state and annotations are
+// normally stored in the SQLite library; the sidecar is used for imports and
+// explicit exports.
 package annot
 
 import (
@@ -13,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 )
 
 const (
@@ -25,8 +25,7 @@ const (
 )
 
 var (
-	writeMu sync.Mutex
-	known   = map[string]struct{}{
+	known = map[string]struct{}{
 		"highlight": {},
 		"underline": {},
 		"strikeout": {},
@@ -77,6 +76,9 @@ func AdjacentPath(pdfPath string) string {
 
 // Fingerprint identifies a document cheaply but robustly enough to detect a
 // replaced file: size + mtime + hash of the first MiB.
+// Fingerprint identifies a document by content, not by metadata: size plus a
+// SHA-256 over the first and last MiB. mtime is deliberately excluded so that
+// copying or restoring a PDF does not orphan its reading data.
 func Fingerprint(pdfPath string) (string, error) {
 	f, err := os.Open(pdfPath)
 	if err != nil {
@@ -89,108 +91,26 @@ func Fingerprint(pdfPath string) (string, error) {
 		return "", err
 	}
 
+	const chunk = 1 << 20
 	h := sha256.New()
-	if _, err := io.CopyN(h, f, 1<<20); err != nil && err != io.EOF {
-		return "", err
-	}
-
-	return fmt.Sprintf("%d:%d:%s", info.Size(), info.ModTime().Unix(), hex.EncodeToString(h.Sum(nil))), nil
-}
-
-// Load reads an existing sidecar, if any. A corrupt sidecar is reported in
-// Warning and treated as absent so reading can continue.
-func Load(pdfPath, fallbackRoot string) (LoadResult, error) {
-	fp, err := Fingerprint(pdfPath)
-	if err != nil {
-		return LoadResult{}, err
-	}
-
-	res := LoadResult{Fingerprint: fp}
-	adj := AdjacentPath(pdfPath)
-
-	candidates := []struct {
-		path     string
-		portable bool
-	}{
-		{adj, true},
-		{centralPath(pdfPath, fallbackRoot), false},
-	}
-
-	for _, c := range candidates {
-		raw, err := os.ReadFile(c.path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			res.Warning = "无法读取标注文件：" + err.Error()
-			return res, nil
+	if info.Size() <= 2*chunk {
+		// Small files are cheap to hash completely and avoid ambiguity.
+		if _, err := io.Copy(h, f); err != nil {
+			return "", err
 		}
-		if err := Validate(raw); err != nil {
-			res.Warning = "标注文件格式无效，已忽略：" + err.Error()
-			return res, nil
+	} else {
+		if _, err := io.CopyN(h, f, chunk); err != nil {
+			return "", err
 		}
-		res.Data = string(raw)
-		res.Path = c.path
-		res.Portable = c.portable
-		return res, nil
+		if _, err := f.Seek(-chunk, io.SeekEnd); err != nil {
+			return "", err
+		}
+		if _, err := io.CopyN(h, f, chunk); err != nil {
+			return "", err
+		}
 	}
 
-	// Nothing exists yet: decide where the first save will go.
-	target, portable := targetPath(pdfPath, fallbackRoot)
-	res.Path = target
-	res.Portable = portable
-	return res, nil
-}
-
-// Save validates and atomically writes the sidecar, keeping one backup.
-func Save(pdfPath, fallbackRoot string, raw []byte) (string, error) {
-	if len(raw) > MaxSidecar {
-		return "", fmt.Errorf("标注数据超过 %d MB 上限", MaxSidecar>>20)
-	}
-	if err := Validate(raw); err != nil {
-		return "", err
-	}
-
-	target, _ := targetPath(pdfPath, fallbackRoot)
-
-	writeMu.Lock()
-	defer writeMu.Unlock()
-
-	if err := writeAtomic(target, raw); err != nil {
-		return "", err
-	}
-	return target, nil
-}
-
-func targetPath(pdfPath, fallbackRoot string) (string, bool) {
-	adj := AdjacentPath(pdfPath)
-	if _, err := os.Stat(adj); err == nil {
-		return adj, true
-	}
-	if dirWritable(filepath.Dir(pdfPath)) {
-		return adj, true
-	}
-	return centralPath(pdfPath, fallbackRoot), false
-}
-
-func centralPath(pdfPath, fallbackRoot string) string {
-	fp, err := Fingerprint(pdfPath)
-	if err != nil {
-		fp = pdfPath
-	}
-	sum := sha256.Sum256([]byte(fp))
-	return filepath.Join(fallbackRoot, "notes", hex.EncodeToString(sum[:16])+".json")
-}
-
-func dirWritable(dir string) bool {
-	f, err := os.CreateTemp(dir, ".pvwrite-*")
-	if err != nil {
-		return false
-	}
-	name := f.Name()
-	f.Close()
-	os.Remove(name)
-	return true
+	return fmt.Sprintf("%d:%s", info.Size(), hex.EncodeToString(h.Sum(nil))), nil
 }
 
 // Validate checks the schema envelope and annotation headers.
@@ -206,17 +126,48 @@ func Validate(raw []byte) error {
 	if d.Schema < 1 || d.Schema > SchemaVersion {
 		return fmt.Errorf("不支持的版本 %d", d.Schema)
 	}
-	if len(d.Annotations) > MaxAnnots {
-		return fmt.Errorf("标注数量过多")
-	}
 	if d.Doc.Pages < 0 || d.Doc.Pages > MaxPages {
 		return fmt.Errorf("页数非法")
 	}
-	if len(d.Reading.ReadPages) > MaxPages {
-		return fmt.Errorf("已读页数非法")
+	if err := ValidateReading(d.Reading); err != nil {
+		return err
+	}
+	if err := ValidateAnnotations(d.Annotations); err != nil {
+		return err
 	}
 
-	for i, item := range d.Annotations {
+	// Reject trailing garbage to keep files strict.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var probe any
+	if err := dec.Decode(&probe); err != nil {
+		return err
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return fmt.Errorf("JSON 尾部存在多余内容")
+	}
+	return nil
+}
+
+// ValidateReading checks the reading-state part of a sidecar payload.
+func ValidateReading(r Reading) error {
+	if len(r.ReadPages) > MaxPages {
+		return fmt.Errorf("已读页数非法")
+	}
+	if r.LastPage < 0 || r.LastPage > MaxPages {
+		return fmt.Errorf("页码非法")
+	}
+	if r.Zoom < -100 || r.Zoom > 100 {
+		return fmt.Errorf("缩放比例非法")
+	}
+	return nil
+}
+
+// ValidateAnnotations checks the annotation envelopes of a sidecar payload.
+func ValidateAnnotations(items []json.RawMessage) error {
+	if len(items) > MaxAnnots {
+		return fmt.Errorf("标注数量过多")
+	}
+	for i, item := range items {
 		var head struct {
 			ID   string `json:"id"`
 			Type string `json:"type"`
@@ -235,35 +186,73 @@ func Validate(raw []byte) error {
 			return fmt.Errorf("第 %d 条标注页码无效", i+1)
 		}
 	}
-
-	// Reject trailing garbage to keep files strict.
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	var probe any
-	if err := dec.Decode(&probe); err != nil {
-		return err
-	}
-	if err := dec.Decode(new(any)); err != io.EOF {
-		return fmt.Errorf("JSON 尾部存在多余内容")
-	}
 	return nil
 }
 
-func writeAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-
-	if old, err := os.ReadFile(path); err == nil {
-		if err := writeFileAtomic(path+".bak", old); err != nil {
-			return fmt.Errorf("写入备份失败: %w", err)
+// ReadAdjacent returns the portable sidecar sitting next to the PDF, if any.
+func ReadAdjacent(pdfPath string) ([]byte, bool, error) {
+	raw, err := os.ReadFile(AdjacentPath(pdfPath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
 		}
+		return nil, false, err
 	}
+	return raw, true, nil
+}
 
-	if err := writeFileAtomic(path, data); err != nil {
-		return err
+// ReadLegacyCentral locates the pre-SQLite fallback sidecar for a document.
+// It reproduces the historical path hash (size + mtime + head hash) so that
+// documents stored in read-only folders keep their state after the upgrade.
+func ReadLegacyCentral(pdfPath, fallbackRoot string) ([]byte, bool, error) {
+	fp, err := legacyFingerprint(pdfPath)
+	if err != nil {
+		return nil, false, err
 	}
-	return nil
+	sum := sha256.Sum256([]byte(fp))
+	path := filepath.Join(fallbackRoot, "notes", hex.EncodeToString(sum[:16])+".json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return raw, true, nil
+}
+
+func legacyFingerprint(pdfPath string) (string, error) {
+	f, err := os.Open(pdfPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	if _, err := io.CopyN(h, f, 1<<20); err != nil && err != io.EOF {
+		return "", err
+	}
+	return fmt.Sprintf("%d:%d:%s", info.Size(), info.ModTime().Unix(), hex.EncodeToString(h.Sum(nil))), nil
+}
+
+// WritePortable writes an explicit export next to the PDF. Unlike Save it
+// never falls back to the application support directory and keeps no .bak:
+// exporting is a deliberate user action, not a high-frequency autosave.
+func WritePortable(pdfPath string, raw []byte) (string, error) {
+	if len(raw) > MaxSidecar {
+		return "", fmt.Errorf("标注数据超过 %d MB 上限", MaxSidecar>>20)
+	}
+	if err := Validate(raw); err != nil {
+		return "", err
+	}
+	target := AdjacentPath(pdfPath)
+	if err := writeFileAtomic(target, raw); err != nil {
+		return "", err
+	}
+	return target, nil
 }
 
 func writeFileAtomic(path string, data []byte) error {

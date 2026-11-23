@@ -17,7 +17,7 @@
 | R5 | 标注、阅读进度、上次阅读位置持久化，重开即恢复 |
 | R6 | 大文档可用：≥500 页、≥100 MB 不卡死、不爆内存 |
 | R7 | 文档内搜索、缩略图、大纲导航 |
-| R8 | 完全离线，无网络请求、无遥测 |
+| R8 | 默认完全离线，无后台网络请求、无遥测；仅当用户安装并启用在线翻译插件后，才按插件 manifest 声明的域名发起请求（Go 侧执行、域名固定、拒绝重定向） |
 
 ### 1.2 非目标（v1 明确不做）
 
@@ -71,6 +71,20 @@
 | Go | 标准库为主；`pdfcpu` 仅备用（元数据/导出） | 无 cgo |
 | 测试 | Go `testing`、Vitest、（可选）Playwright | |
 
+### 2.4 可选翻译插件
+
+翻译不是内置能力，而是可安装的声明式插件，默认不安装：
+
+- `.pdfplugin` 是 zip，内含 `manifest.json`；词典插件另含 SQLite 数据。插件内没有任何可执行代码。
+- 宿主只为 translator 执行五种内置 HTTP 适配器（OpenAI 兼容 / DeepL / Google / 百度 / 有道），或为 dictionary 只读查询 SQLite。
+- endpoint 在安装时校验（https，仅本机允许 http），运行时请求固定到该主机并拒绝重定向；API Key 存于插件目录 `.config.json`（0600）。
+- 安装校验拒绝 zip-slip、符号链接、超限文件；更新需版本不回退；卸载删除配置与密钥。
+- 右键菜单按选中内容选择：单词/短词优先离线词典，整句走默认在线翻译；非英文置灰。
+- 整句译文下方附带逐词详解：音标、词性、多条释义；复用离线词典插件，批量查询一次打开数据库。
+- 翻译请求 15 秒超时，前端可取消；内存 LRU 缓存 200 条，失败不缓存。
+
+插件格式、示例与安全边界见 [PLUGINS.md](PLUGINS.md)。
+
 ---
 
 ## 3. 总体架构
@@ -82,8 +96,9 @@
 │   ┌────────────────────┐   bindings/events   ┌──────────────────────────┐  │
 │   │ app.go  窗口/生命周期│◄──────────────────►│ UI 层（TypeScript）       │  │
 │   │ library 最近文件     │                     │  ├ 工具栏 / 侧栏 / 对话框 │  │
-│   │ annot   sidecar 存储 │                     │  ├ 页面容器 + 虚拟滚动    │  │
-│   │ settings 设置        │   HTTP Range 流     │  ├ pdf.js 渲染 + 文本层   │  │
+│   │ notestore SQLite 库  │                     │  ├ 页面容器 + 虚拟滚动    │  │
+│   │ annot   导出/导入格式 │                     │  ├ pdf.js 渲染 + 文本层   │  │
+│   │ settings 设置        │   HTTP Range 流     │  ├ 标注叠加层（SVG/DOM）  │  │
 │   │ pdfstream 本地资源   │◄───────────────────►│  └ 标注叠加层（SVG/DOM）  │  │
 │   └─────────┬──────────┘                     └──────────────────────────┘  │
 │             │                                                              │
@@ -91,13 +106,14 @@
               │
      ┌────────▼─────────┐        ┌──────────────────────────────┐
      │ App Support 目录  │        │ <文档>.pdfviewer.json         │
+     │ library.db (WAL)  │        │ 仅显式导出/导入（可选）       │
      │ 设置/最近文件/缓存 │        │ 标注 + 阅读进度（非破坏性）   │
      └──────────────────┘        └──────────────────────────────┘
 ```
 
 **职责边界**
 
-- Go：文件对话框、读取 PDF 字节流（支持 Range）、sidecar 读写与校验、设置、最近文件、窗口状态、单实例、导出（v1.1）。
+- Go：文件对话框、读取 PDF 字节流（支持 Range）、SQLite 持久化、sidecar 导入/导出、设置、最近文件、窗口状态、单实例、插件安装与翻译/查词请求。
 - 前端：一切渲染与交互、坐标换算、撤销栈、搜索索引、标注绘制。
 - 原则：**Go 不碰 PDF 内部结构，前端不碰任意文件系统路径**（路径由 Go 下发 token 授权）。
 
@@ -127,7 +143,7 @@
 
 ### 4.3 标注与「涂改」
 
-工具集（左侧浮动工具条 + 快捷键）：
+工具集（顶部标注工具条 + 快捷键）：
 
 | 工具 | 行为 | 数据 |
 |------|------|------|
@@ -142,7 +158,7 @@
 
 交互细节：
 
-- 选中文字后弹出浮动工具条：点颜色直接高亮，或选择下划线 / 删除线 / 复制；
+- 选中文字不弹浮动工具条；右键菜单提供颜色、高亮 / 下划线 / 删除线、复制，以及翻译 / 查词入口；
   使用高亮 / 下划线 / 删除线工具时则选中即落笔，适合连续标记。
 - 同一段连续选区合并为一条标注；跨页选区按页拆分为多条，共享 `groupId`。
 - 点击标注可选中、改色、加备注、删除；拖动与缩放排期 v1.1。
@@ -191,19 +207,23 @@
 
 ### 5.1 存放位置
 
-- **默认**：与 PDF 同目录的旁挂文件 `报告.pdf.pdfviewer.json`（可随文件一起拷贝/同步）。
-- **回退**：目录不可写（只读盘、系统目录、部分网盘）时，改存应用数据目录，按文档指纹索引：
-  - macOS `~/Library/Application Support/PDFViewer/notes/<sha256>.json`
-  - Windows `%APPDATA%\PDFViewer\notes\<sha256>.json`
-- 设置与最近文件：同目录下 `settings.json` / `recent.json`。
+- **默认（日常读写）**：本地 SQLite 库，WAL 模式：
+  - macOS `~/Library/Application Support/PDFViewer/library.db`
+  - Windows `%APPDATA%\PDFViewer\library.db`
+- 表：`documents` / `reading` / `read_pages` / `annotations`；阅读位置只更新一行，标注按 id 增量 upsert。
+- **便携格式**：`报告.pdf.pdfviewer.json`（schema v1）只在两种场景出现：
+  1. 用户点「导出 .pdfviewer.json」；
+  2. 打开时数据库里还没有该文档的状态，且同目录存在旧版 sidecar（一次性导入）。
+- 旧 sidecar 导入后**不再回写**，也不会生成 `.bak`；用户可自行删除或保留作为备份。
+- 设置与最近文件：`PDFViewer/settings.json` / `recent.json`。
 - 原则：**永不修改原 PDF**；sidecar 丢失只丢标注，不丢文档。
 
 ### 5.2 指纹与冲突
 
-- 指纹 = `size + mtime + sha256(前 1 MB)`，用于判断「文件被替换」。
-- 打开时若指纹不匹配：提示「文档已变更」，提供「沿用标注 / 另存为新副本 / 放弃」。
-- 写入采用「临时文件 + rename」原子替换，保留一份 `.bak`；同一路径用进程内互斥锁串行化。
-- 若检测到外部修改（mtime 变化），不覆盖，写出 `*.conflict-<时间>.json` 并提示。
+- 内容指纹 = `size + sha256(前 1 MiB + 后 1 MiB)`，**不包含 mtime**；复制、恢复、移动文件不会改变身份。
+- 数据库以 `content_id` 为唯一键，`path` 只是映射：移动/重命名 PDF 后仍能找回阅读数据。
+- 所有写入在单个事务中完成；SQLite 自身提供多进程锁，配合 `busy_timeout=5s`。
+- 显式导出仍用「临时文件 + fsync + rename」原子替换，避免半截 JSON。
 
 ### 5.3 Schema（v1）
 
@@ -213,7 +233,7 @@
   "doc": {
     "name": "report.pdf",
     "size": 12345678,
-    "fingerprint": "12345678:1712345678:9f2c...",
+    "fingerprint": "12345678:9f2c...",
     "pages": 120
   },
   "reading": {
@@ -310,10 +330,12 @@
 | 绑定 | 说明 |
 |------|------|
 | `OpenDialog() (path, err)` | 系统文件选择框（*.pdf） |
-| `OpenDocument(path) (DocInfo, err)` | 校验、计算指纹、分配 token、读 sidecar |
+| `OpenDocument(path) (DocInfo, err)` | 校验、计算内容指纹、分配 token、登记文档 |
 | `GetDocumentURL(token) (url, err)` | 返回带 Range 的本地 URL |
-| `LoadSidecar(token) (string, err)` | 返回原始 JSON（前端解析） |
-| `SaveSidecar(token, json) error` | 校验 + 原子写 + 备份 |
+| `LoadSidecar(token) (string, err)` | 从 SQLite 组装便携 JSON（前端解析） |
+| `SaveReading(token, reading, pages)` | 只更新阅读位置/缩放/已读页 |
+| `SaveAnnotations(token, json)` | 按 id 增量 upsert + 删除缺失项 |
+| `ExportSidecar(token)` / `ImportSidecar(token)` | 显式导出/导入旁挂 JSON |
 | `ListRecent() / TouchRecent(path) / RemoveRecent(path)` | 最近文件 |
 | `GetSettings() / SaveSettings(json)` | 设置 |
 | `ChooseExportPath() (path, err)` | v1.1 导出 |
@@ -336,7 +358,8 @@ pdfviewer/
 ├── app.go                     # App 结构体、绑定方法
 ├── internal/
 │   ├── library/               # 最近文件、路径校验
-│   ├── annot/                 # sidecar schema、原子写、迁移、指纹
+│   ├── annot/                 # 便携 JSON schema、校验、指纹、导出
+│   ├── notestore/             # SQLite（documents/reading/read_pages/annotations）
 │   ├── settings/              # 设置读写
 │   └── pdfstream/             # Range 资源路由、token 管理
 ├── frontend/
@@ -391,7 +414,7 @@ pdfviewer/
 
 ## 10. 测试计划
 
-- **Go 单测**：sidecar 原子写、破损 JSON 容错、指纹计算、路径回退、迁移入口。
+- **Go 单测**：SQLite 增量读写、阅读状态 round-trip、标注 reconcile、sidecar 迁移/导入、破损 JSON 容错、指纹稳定性。
 - **TS 单测（Vitest）**：归一化坐标往返、选区矩形合并、旋转变换、撤销栈、搜索命中映射。
 - **手工矩阵**：
   - 系统：macOS 13/14/15（Intel + ARM）、Windows 10/11。
@@ -409,7 +432,7 @@ pdfviewer/
 | WKWebView 捏合缩放整页 | 缩放错乱 | 拦截 `ctrl+wheel` 与 `gesture*`，`preventDefault`；CSS `touch-action` |
 | 高倍缩放内存爆炸 | 崩溃 | 渲染 scale 上限 3 + 页面回收 + canvas 尺寸上限告警 |
 | 扫描件无文本层 | 无法高亮句子 | 区域框选工具；OCR 列入 v2 |
-| sidecar 与网盘/多端冲突 | 标注丢失 | 指纹校验 + 冲突副本 + 原子写 + 备份 |
+| 多端/网盘与本地库不一致 | 标注丢失 | 内容指纹 + 事务 + busy_timeout + 显式导出/导入 |
 | 加密/损坏 PDF | 打不开 | 捕获 pdf.js 异常，给明确错误码与「用系统预览打开」入口 |
 | 双栏/复杂版式选区合并错误 | 高亮错位 | 按行 y 聚类 + x 排序，跨列断开；提供「手动框选」兜底 |
 | 中文文本层字间空格 | 搜索/复制异常 | 文本归一化（去零宽字符、合并孤立空格），保留双向映射 |
@@ -432,7 +455,7 @@ pdfviewer/
 ## 13. 已确认事项（2026-11-22）
 
 1. 技术路线：**Wails v2 + pdf.js**，Go 负责骨架与数据层。
-2. 标注存储：**旁挂 JSON，非破坏**；导出带标注 PDF 放到 v1.1。
+2. 标注存储：**本地 SQLite 为主，旁挂 JSON 为可选导出/交换格式**；导出带标注 PDF 放到 v1.1。
 3. 首版范围：**按本文档全量 MVP**。
 4. 界面风格：**系统原生简洁**（暖灰纸面、细工具栏、松绿强调色）。
 
@@ -444,7 +467,7 @@ pdfviewer/
 
 - 叠层结构：把工具栏、搜索条、空状态、加载层移到**不随文档滚动的 viewer shell** 中，避免浮动控件被滚走。
 - 工具栏颜色选择与选中文字浮动条合并；高亮 / 下划线 / 删除线可一键落笔。
-- 阅读进度去重：sidecar 内容未变化时不重复写盘。
+- 阅读进度去重：SQLite 只更新变化字段，内容未变化时不写库；不再每次滚动重写 JSON + `.bak`。
 - 旋转：pdf.js 的文本层需要 `[data-main-rotation]` 旋转规则才能与 canvas 对齐；已补齐，旋转后选区与标注坐标仍然正确。
 - `LoadSidecar` 直接返回原始 JSON 字符串（避免 `[]byte` 的 base64 编解码歧义）。
 - 最近文件时间戳使用 Unix 毫秒，避免 Wails 对 `time.Time` 的绑定告警。

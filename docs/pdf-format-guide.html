@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一张不会走样的纸 · PDF 格式科普</title>
+<style>
+:root{
+  --paper:#E8EAE3;
+  --paper-2:#F2F3EC;
+  --paper-3:#DDE1D6;
+  --ink:#17231E;
+  --ink-soft:#455249;
+  --ink-faint:#6F7C72;
+  --line:#C2C9BB;
+  --line-dark:#96A195;
+  --pine:#1E4D3D;
+  --pine-2:#2F6B54;
+  --clay:#B24F2C;
+  --amber:#D5A02A;
+  --sage:#8FA88B;
+  --mint:#CFE0D6;
+  --white:#FBFCF7;
+  --display:"Songti SC","Noto Serif SC","Source Han Serif SC",Georgia,"Times New Roman",serif;
+  --body:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --mono:"SFMono-Regular",Menlo,Consolas,"PingFang SC",monospace;
+  --maxw:1180px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;
+  background:
+    linear-gradient(var(--line) 1px,transparent 1px) 0 0/100% 32px,
+    var(--paper);
+  color:var(--ink);
+  font-family:var(--body);
+  font-size:16px;
+  line-height:1.72;
+  -webkit-font-smoothing:antialiased;
+}
+body::before{
+  content:"";
+  position:fixed;
+  inset:0;
+  pointer-events:none;
+  background:linear-gradient(90deg,transparent 0 50%,rgba(255,255,255,.12) 50% 100%);
+  mix-blend-mode:soft-light;
+}
+a{color:var(--pine);text-underline-offset:3px}
+a:hover{color:var(--clay)}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 34px}
+.mono{font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase}
+.kicker{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--clay)}
+.rule{height:1px;background:var(--line-dark);border:0;margin:0}
+.chip{
+  display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:.08em;
+  text-transform:uppercase;border:1px solid var(--line-dark);padding:2px 6px;
+  white-space:nowrap;color:var(--ink-soft);background:rgba(251,252,247,.35)
+}
+
+/* cover */
+.cover{position:relative;min-height:92vh;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;border-bottom:1px solid var(--line-dark)}
+.cover-grid{display:grid;grid-template-columns:1.45fr .55fr;gap:50px;align-items:center;padding:64px 0 34px}
+.cover h1,h2{text-wrap:balance}
+h1{
+  font-family:var(--display);font-weight:700;font-size:clamp(64px,10.2vw,126px);
+  line-height:.88;letter-spacing:-.055em;margin:18px 0 24px;max-width:9.5ch;
+}
+.cover h1 em{font-style:normal;color:var(--clay)}
+.lede{max-width:47ch;font-size:clamp(17px,1.65vw,21px);line-height:1.62;color:var(--ink-soft);margin:0 0 26px}
+.meta{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:30px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line-dark);border-bottom:1px solid var(--line-dark)}
+.stat{padding:13px 12px 14px;border-right:1px solid var(--line-dark)}
+.stat:last-child{border-right:0}
+.stat b{display:block;font-family:var(--display);font-size:clamp(26px,3.6vw,44px);line-height:1;letter-spacing:-.04em;font-weight:700}
+.stat span{display:block;margin-top:7px;font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint)}
+.ghost{
+  position:absolute;right:-.04em;top:-.12em;font-family:var(--display);font-weight:700;
+  font-size:clamp(190px,31vw,420px);line-height:.8;letter-spacing:-.08em;color:rgba(30,77,61,.055);
+  pointer-events:none;user-select:none;
+}
+.cover-visual{position:relative;display:flex;align-items:center;justify-content:center;min-height:440px}
+.disc{
+  width:min(390px,32vw);aspect-ratio:1;border:1px solid var(--line-dark);border-radius:50%;
+  position:relative;background:radial-gradient(circle at 50% 50%,rgba(251,252,247,.7) 0 42%,transparent 43%);
+}
+.disc::before,.disc::after{content:"";position:absolute;inset:11%;border:1px solid var(--line);border-radius:50%}
+.disc::after{inset:27%;border-style:dashed}
+.page-mark{
+  position:absolute;left:50%;top:50%;width:42%;height:54%;transform:translate(-50%,-50%) rotate(-5deg);
+  border:1.5px solid var(--pine);background:var(--white);box-shadow:8px 10px 0 rgba(30,77,61,.08);
+}
+.page-mark::before{content:"PDF";position:absolute;left:9%;top:10%;font-family:var(--mono);font-size:11px;letter-spacing:.12em;color:var(--clay)}
+.page-mark::after{
+  content:"";position:absolute;left:9%;right:9%;top:33%;height:1px;background:var(--line-dark);
+  box-shadow:0 15px 0 var(--line),0 30px 0 var(--line),0 45px 0 var(--line);
+}
+.disc-label{position:absolute;bottom:2%;left:50%;transform:translateX(-50%);white-space:nowrap;color:var(--ink-faint)}
+.axis{position:absolute;background:var(--line-dark)}
+.axis.x{left:-9%;right:-9%;top:50%;height:1px}
+.axis.y{top:-9%;bottom:-9%;left:50%;width:1px}
+.cover-strip{display:flex;justify-content:space-between;gap:20px;padding:13px 0 18px;border-top:1px solid var(--line-dark);font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint)}
+
+/* layout and toc */
+.layout{display:grid;grid-template-columns:205px minmax(0,1fr);gap:52px;align-items:start;padding:52px 0 90px}
+.toc{position:sticky;top:22px}
+.toc h2{font-family:var(--mono);font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-faint);margin:0 0 12px;font-weight:500}
+.toc ol{list-style:none;margin:0;padding:0;border-top:1px solid var(--line-dark)}
+.toc li{border-bottom:1px solid var(--line)}
+.toc a{display:flex;gap:9px;padding:7px 0;font-size:12.5px;color:var(--ink-soft);text-decoration:none;line-height:1.35}
+.toc a b{font-family:var(--mono);font-weight:400;font-size:9px;letter-spacing:.08em;color:var(--ink-faint);min-width:18px;padding-top:2px}
+.toc a:hover,.toc a.active{color:var(--clay)}
+.toc a.active b{color:var(--clay)}
+.toc-note{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);font-family:var(--mono);font-size:9px;line-height:1.7;color:var(--ink-faint)}
+
+/* sections */
+.section{position:relative;padding:0 0 76px}
+.section + .section{padding-top:2px}
+.sec-head{position:relative;margin-bottom:24px;padding-top:12px;border-top:1px solid var(--line-dark)}
+.sec-num{
+  position:absolute;right:0;top:-24px;font-family:var(--display);font-weight:700;
+  font-size:clamp(74px,10vw,132px);line-height:1;letter-spacing:-.07em;color:rgba(30,77,61,.08);
+  pointer-events:none;user-select:none;
+}
+.sec-head h2{position:relative;font-family:var(--display);font-weight:700;font-size:clamp(30px,4.3vw,52px);line-height:1.06;letter-spacing:-.035em;margin:8px 0 10px;max-width:20ch}
+.sec-head p{position:relative;margin:0;max-width:58ch;color:var(--ink-soft);font-size:15px}
+.prose{max-width:68ch}
+.prose p{margin:0 0 1.05em}
+.prose strong{color:var(--pine);font-weight:600}
+.prose em{font-style:normal;color:var(--clay)}
+.small{font-size:13.5px;line-height:1.65;color:var(--ink-soft)}
+.caption{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint);margin-top:8px}
+.quote{
+  margin:36px 0;padding:18px 0;border-top:1px solid var(--line-dark);border-bottom:1px solid var(--line-dark);
+  font-family:var(--display);font-size:clamp(24px,3vw,38px);line-height:1.25;letter-spacing:-.03em;
+}
+.quote span{color:var(--clay)}
+
+/* cards */
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:22px 0}
+.card{border:1px solid var(--line-dark);background:rgba(251,252,247,.45);padding:16px 18px 18px;border-radius:0}
+.card.pine{border-top:3px solid var(--pine)}
+.card.clay{border-top:3px solid var(--clay)}
+.card.amber{border-top:3px solid var(--amber)}
+.card h3{font-size:15px;margin:0 0 7px;line-height:1.35}
+.card p{margin:0;font-size:13px;line-height:1.65;color:var(--ink-soft)}
+.card .mono{display:block;margin-bottom:7px;color:var(--ink-faint)}
+
+/* diagrams */
+.figure{border:1px solid var(--line-dark);background:rgba(251,252,247,.34);margin:24px 0;padding:18px}
+.figure-head{display:flex;justify-content:space-between;gap:14px;align-items:baseline;margin-bottom:14px}
+.figure-head b{font-size:13px;font-weight:600}
+.figure-head span{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint)}
+.anatomy{display:grid;grid-template-columns:1.05fr .95fr;gap:14px;align-items:stretch}
+.code{
+  background:var(--ink);color:#DCE5DB;padding:14px 16px;font-family:var(--mono);font-size:10px;line-height:1.75;
+  overflow:auto;white-space:pre;border:1px solid var(--ink);
+}
+.code .hl{color:#E5B85A}
+.code .dim{color:#89988D}
+.anatomy-notes{display:flex;flex-direction:column;gap:0;border-top:1px solid var(--line-dark)}
+.an-row{display:grid;grid-template-columns:26px 1fr;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:12px;line-height:1.55}
+.an-row b{font-family:var(--mono);font-weight:500;font-size:9px;color:var(--clay);padding-top:2px}
+.an-row span{color:var(--ink-soft)}
+
+.pipeline{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--line-dark);margin:22px 0}
+.pipe{padding:14px 13px 15px;border-right:1px solid var(--line-dark);position:relative}
+.pipe:last-child{border-right:0}
+.pipe .mono{display:block;color:var(--clay);margin-bottom:8px}
+.pipe b{display:block;font-size:13px;margin-bottom:5px}
+.pipe p{margin:0;font-size:11.5px;line-height:1.55;color:var(--ink-soft)}
+.pipe::after{content:"→";position:absolute;right:-7px;top:50%;transform:translateY(-50%);background:var(--paper-2);color:var(--line-dark);font-family:var(--mono);font-size:12px;padding:0 1px}
+.pipe:last-child::after{content:""}
+
+/* tables */
+.table-wrap{overflow-x:auto;border:1px solid var(--line-dark);margin:22px 0}
+table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:560px}
+th{background:var(--ink);color:var(--paper-2);font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;text-align:left;padding:9px 11px;font-weight:500}
+td{padding:9px 11px;border-top:1px solid var(--line);vertical-align:top;color:var(--ink-soft)}
+td:first-child{color:var(--ink);font-weight:600}
+tr:nth-child(even) td{background:rgba(251,252,247,.35)}
+
+/* myths */
+.myths{display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid var(--line-dark);border-left:1px solid var(--line-dark);margin:22px 0}
+.myth{border-right:1px solid var(--line-dark);border-bottom:1px solid var(--line-dark);padding:15px 17px 16px;background:rgba(251,252,247,.34)}
+.myth .mono{display:block;color:var(--clay);margin-bottom:5px}
+.myth b{display:block;font-size:13px;margin-bottom:4px}
+.myth p{margin:0;font-size:11.5px;line-height:1.55;color:var(--ink-soft)}
+
+/* note */
+.note{border-left:3px solid var(--amber);background:rgba(213,160,42,.07);padding:13px 17px;font-size:13px;line-height:1.6;margin:20px 0}
+.note b{color:var(--ink)}
+.aside{border-left:3px solid var(--pine);background:rgba(30,77,61,.06);padding:13px 17px;font-size:13px;line-height:1.6;margin:20px 0}
+
+/* timeline */
+.timeline{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line-dark);margin:24px 0}
+.tl{padding:13px 13px 4px 0;border-right:1px solid var(--line);position:relative}
+.tl:last-child{border-right:0}
+.tl::before{content:"";position:absolute;top:-4px;left:0;width:7px;height:7px;border-radius:50%;background:var(--clay)}
+.tl b{display:block;font-family:var(--display);font-size:27px;line-height:1;letter-spacing:-.04em}
+.tl span{display:block;margin-top:7px;font-size:11.5px;line-height:1.55;color:var(--ink-soft)}
+
+/* glossary */
+.glossary{display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid var(--line-dark);margin-top:16px}
+.term{padding:9px 14px 10px 0;border-bottom:1px solid var(--line);font-size:12px;line-height:1.55}
+.term b{color:var(--pine)}
+.term span{color:var(--ink-soft)}
+
+footer{border-top:1px solid var(--line-dark);padding:18px 0 38px;display:flex;justify-content:space-between;gap:20px;color:var(--ink-faint);font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase}
+.end-mark{display:flex;align-items:center;gap:10px;margin:36px 0 0;color:var(--ink-faint)}
+.end-mark::before,.end-mark::after{content:"";height:1px;background:var(--line-dark);flex:1}
+.end-mark span{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase}
+
+@media (max-width:980px){
+  .cover-grid{grid-template-columns:1fr;gap:24px}
+  .cover-visual{display:none}
+  .layout{grid-template-columns:1fr;gap:24px}
+  .toc{position:static;order:2;margin-top:18px}
+  .toc ol{display:grid;grid-template-columns:1fr 1fr;border-top:0}
+  .toc li:nth-child(odd){border-right:1px solid var(--line);padding-right:12px}
+  .toc-note{display:none}
+  .section{order:1}
+  .cover{min-height:auto}
+  .cover-strip{flex-direction:column;gap:4px}
+}
+@media (max-width:760px){
+  .wrap{padding:0 18px}
+  .cards,.pipeline,.timeline,.myths,.glossary{grid-template-columns:1fr}
+  .pipe{border-right:0;border-bottom:1px solid var(--line-dark)}
+  .pipe:last-child{border-bottom:0}
+  .pipe::after{content:"↓";right:50%;top:auto;bottom:-9px;transform:translateX(50%)}
+  .tl{border-right:0;border-bottom:1px solid var(--line);padding-bottom:12px}
+  .tl:last-child{border-bottom:0}
+  .anatomy{grid-template-columns:1fr}
+  .stats{grid-template-columns:1fr 1fr}
+  .stat:nth-child(2){border-right:0}
+  .stat:nth-child(-n+2){border-bottom:1px solid var(--line-dark)}
+  .myth{border-right:0}
+  .sec-num{font-size:72px;top:-16px}
+  footer{flex-direction:column;gap:6px}
+}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *{animation:none!important;transition:none!important}
+}
+@media print{
+  @page{size:A4;margin:14mm}
+  html,body{background:#fff!important;color:#000!important}
+  body{font-size:10pt;line-height:1.55}
+  body::before,.ghost,.toc,.cover-visual,.axis{display:none!important}
+  .wrap{max-width:none;padding:0}
+  .cover{min-height:auto;border-bottom:1px solid #999;padding-bottom:8mm}
+  .cover-grid{padding:0;display:block}
+  .cover h1{font-size:46pt;max-width:11ch;margin:4mm 0 5mm}
+  .cover h1 em{color:#000}
+  .lede{font-size:11.5pt;max-width:52ch}
+  .stats{grid-template-columns:repeat(4,1fr);border-color:#999}
+  .stat b{font-size:20pt}
+  .stat{border-color:#999}
+  .cover-strip{border-color:#999;color:#555}
+  .layout{display:block;padding:8mm 0 0}
+  .section{padding:0 0 7mm;break-inside:auto}
+  .section+.section{padding-top:0}
+  .sec-head{border-color:#999;margin-bottom:5mm;padding-top:4mm}
+  .sec-head h2{font-size:22pt;max-width:22ch}
+  .sec-head p{font-size:10pt}
+  .sec-num{display:none}
+  .prose{max-width:none}
+  .cards{grid-template-columns:repeat(3,1fr);gap:3mm}
+  .card,.figure,.note,.aside,.quote,.table-wrap,.myths,.timeline,.pipeline{break-inside:avoid}
+  .card{border-color:#999;background:#fff!important;padding:3mm}
+  .figure{background:#fff!important;border-color:#999;padding:3mm}
+  .code{background:#111!important;color:#eee!important;font-size:7.5pt}
+  .quote{font-size:17pt;border-color:#999}
+  .pipe{border-color:#999}
+  .pipe::after{display:none}
+  th{background:#222!important;color:#fff!important}
+  td{border-color:#bbb!important;color:#222!important}
+  tr:nth-child(even) td{background:#f5f5f5!important}
+  .note,.aside{border-left-width:2px;background:#f7f7f7!important}
+  a{color:#000;text-decoration:none}
+  footer{border-color:#999;color:#555}
+  .end-mark{display:none}
+  h2,h3{break-after:avoid}
+}
+</style>
+</head>
+<body>
+<header class="cover">
+  <div class="ghost" aria-hidden="true">PDF</div>
+  <div class="wrap">
+    <div class="cover-grid">
+      <div>
+        <div class="kicker">Format Notes / 文件格式科普</div>
+        <h1>一张不会<br><em>走样</em>的纸</h1>
+        <p class="lede">PDF 不是 Word 的另一种后缀，也不是一张截图。它是一个把字体、图形、坐标和对象装进同一个文件里的容器。</p>
+        <div class="meta">
+          <span class="chip">ISO 32000</span>
+          <span class="chip">1993 → 2017</span>
+          <span class="chip">1/72 inch</span>
+          <span class="chip">Page Description</span>
+        </div>
+        <div class="stats">
+          <div class="stat"><b>1993</b><span>PDF 1.0</span></div>
+          <div class="stat"><b>2008</b><span>成为 ISO 标准</span></div>
+          <div class="stat"><b>2017</b><span>PDF 2.0</span></div>
+          <div class="stat"><b>1/72</b><span>英寸 · 基本单位</span></div>
+        </div>
+      </div>
+      <div class="cover-visual" aria-hidden="true">
+        <div class="disc">
+          <i class="axis x"></i><i class="axis y"></i>
+          <div class="page-mark"></div>
+          <div class="disc-label mono">Fig. 00 — page as coordinates</div>
+        </div>
+      </div>
+    </div>
+    <div class="cover-strip">
+      <span>一份关于页面、对象与坐标的说明</span>
+      <span>Snapshot · 2026</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="layout">
+    <nav class="toc" aria-label="目录">
+      <h2>Contents</h2>
+      <ol>
+        <li><a href="#s00"><b>00</b>先说结论</a></li>
+        <li><a href="#s01"><b>01</b>从 PostScript 到 ISO</a></li>
+        <li><a href="#s02"><b>02</b>拆开一个 PDF</a></li>
+        <li><a href="#s03"><b>03</b>页面不是图片</a></li>
+        <li><a href="#s04"><b>04</b>文字为什么难复制</a></li>
+        <li><a href="#s05"><b>05</b>字体、图片与压缩</a></li>
+        <li><a href="#s06"><b>06</b>一个格式，几个家族</a></li>
+        <li><a href="#s07"><b>07</b>密码、签名与风险</a></li>
+        <li><a href="#s08"><b>08</b>六个常见误解</a></li>
+        <li><a href="#s09"><b>09</b>这个阅读器怎么处理</a></li>
+      </ol>
+      <div class="toc-note">
+        本文讨论的是 PDF 格式本身，<br>
+        不针对某一款编辑器。<br>
+        示例代码为结构示意，省略了<br>
+        对象编号与部分边界条件。
+      </div>
+    </nav>
+
+    <article>
+      <section class="section" id="s00">
+        <div class="sec-head">
+          <div class="sec-num">00</div>
+          <div class="kicker">The short version / 一句话</div>
+          <h2>PDF 记录的是排版结果，不是写作过程</h2>
+          <p>Word 保存的是“这些文字组成一个段落”；PDF 保存的是“这个字形放在这个坐标上”。前者需要重新排版，后者不需要。</p>
+        </div>
+        <div class="cards">
+          <div class="card pine">
+            <span class="mono">Layer 1</span>
+            <h3>页面是画出来的</h3>
+            <p>每一页由一组绘图指令组成：移动坐标、设置字体、画线、贴图片、显示文字。像一张已经排好版的透明胶片。</p>
+          </div>
+          <div class="card clay">
+            <span class="mono">Layer 2</span>
+            <h3>文件是对象图</h3>
+            <p>页面、字体、图片、链接、表单、签名都是对象。对象之间用编号互相引用，形成一张可以增量修改的图。</p>
+          </div>
+          <div class="card amber">
+            <span class="mono">Layer 3</span>
+            <h3>阅读器是解释器</h3>
+            <p>PDF 不是“打开就播放”的视频。阅读器要解析对象、还原字体、执行绘图指令，才能把页面画出来。</p>
+          </div>
+        </div>
+        <blockquote class="quote">“PDF 的目标不是让你编辑它，<span>而是让它在任何设备上都长得一样。</span>”</blockquote>
+        <div class="prose">
+          <p>这也是为什么 PDF 在合同、论文、发票、简历、印刷稿里活得很好：这些场景里，<strong>“看起来一致”比“方便改”更重要</strong>。代价是，PDF 天然不擅长像 Word 那样重排段落。</p>
+        </div>
+      </section>
+
+      <section class="section" id="s01">
+        <div class="sec-head">
+          <div class="sec-num">01</div>
+          <div class="kicker">Origin / 来历</div>
+          <h2>它原来的名字，叫“PostScript 的快照”</h2>
+          <p>1993 年，Adobe 发布 PDF 1.0 和 Acrobat 1.0。PDF 的基因来自 PostScript：一种描述页面如何打印的编程语言。</p>
+        </div>
+        <div class="prose">
+          <p>PostScript 很强大，但它是一门语言，需要解释器，也可能包含复杂逻辑。PDF 把“最终要画成什么样”固定下来，变成一份静态的描述：不再执行排版逻辑，只按坐标把结果画出来。</p>
+          <p>所以 PDF 从出生起就带着两个性格：<strong>像程序一样结构化，像纸张一样固定</strong>。它既能保存字体和矢量图形，也能被增量更新、加密、签名，甚至嵌入 JavaScript 和附件。</p>
+        </div>
+        <div class="timeline">
+          <div class="tl"><b>1993</b><span>Adobe 发布 PDF 1.0 与 Acrobat，目标跨平台保持一致。</span></div>
+          <div class="tl"><b>2008</b><span>PDF 1.7 以 ISO 32000-1 发布，PDF 成为公开国际标准。</span></div>
+          <div class="tl"><b>2017</b><span>ISO 32000-2（PDF 2.0）发布，清理旧包袱并增强安全与标签。</span></div>
+          <div class="tl"><b>今天</b><span>从发票到论文，从印刷到归档，PDF 仍是“最终版”的默认容器。</span></div>
+        </div>
+        <div class="note"><b>一个容易忽略的点：</b>PDF 成为 ISO 标准，不等于所有 PDF 都遵守标准。现实中的文件可能来自几十种生成器，带着各自的扩展、损坏和怪癖。</div>
+      </section>
+
+      <section class="section" id="s02">
+        <div class="sec-head">
+          <div class="sec-num">02</div>
+          <div class="kicker">Anatomy / 解剖</div>
+          <h2>一个 PDF 的骨架，比想象中朴素</h2>
+          <p>把 PDF 用文本编辑器打开，通常能看到文件头、对象、交叉引用表、尾部和结束标记。二进制的部分只是被压缩或编码了。</p>
+        </div>
+        <div class="figure">
+          <div class="figure-head"><b>文件结构示意</b><span>Fig. 01 — PDF anatomy</span></div>
+          <div class="anatomy">
+            <pre class="code">%PDF-1.7
+<span class="dim">% 文件头：告诉阅读器版本</span>
+
+<span class="hl">1 0 obj</span>
+&lt;&lt; /Type /Catalog /Pages 2 0 R &gt;&gt;
+<span class="hl">endobj</span>
+
+<span class="hl">2 0 obj</span>
+&lt;&lt; /Type /Pages /Kids [3 0 R] /Count 1 &gt;&gt;
+<span class="hl">endobj</span>
+
+<span class="dim">... 页面、字体、图片、内容流 ...</span>
+
+<span class="hl">xref</span>
+<span class="dim">0 4</span>
+0000000000 65535 f
+0000000015 00000 n
+0000000064 00000 n
+<span class="hl">trailer</span>
+&lt;&lt; /Root 1 0 R /Size 4 &gt;&gt;
+<span class="hl">startxref</span>
+8831
+%%EOF</pre>
+            <div class="anatomy-notes">
+              <div class="an-row"><b>H</b><span><strong>文件头</strong>：以 <code>%PDF-</code> 开头，声明版本。它不一定代表真实兼容性。</span></div>
+              <div class="an-row"><b>O</b><span><strong>对象</strong>：编号 + 内容。页面、字体、图片、注释、表单字段都是对象。</span></div>
+              <div class="an-row"><b>X</b><span><strong>交叉引用表</strong>：记录每个对象在文件中的字节位置，相当于目录索引。</span></div>
+              <div class="an-row"><b>T</b><span><strong>Trailer</strong>：指向文档根对象，也可能带加密字典、文件 ID 等信息。</span></div>
+              <div class="an-row"><b>E</b><span><strong>%%EOF</strong>：结束标记。增量更新后，文件里可能出现多个 <code>%%EOF</code>。</span></div>
+            </div>
+          </div>
+          <div class="caption">现代 PDF 还可能使用压缩对象流和交叉引用流，外观不再这么直白。</div>
+        </div>
+        <div class="prose">
+          <p><strong>增量更新</strong>是 PDF 一个很聪明的设计：修改文件时，不必重写整个文件，只要在末尾追加新的对象和新的交叉引用表，再把 <code>startxref</code> 指向最新位置。旧数据仍然留在文件里。</p>
+          <p>这解释了两件事：为什么有些 PDF 越改越大；为什么“删除敏感内容”不能只靠肉眼看不见——旧版本可能还在文件里，需要真正的清理与重写。</p>
+        </div>
+      </section>
+
+      <section class="section" id="s03">
+        <div class="sec-head">
+          <div class="sec-num">03</div>
+          <div class="kicker">Page model / 页面模型</div>
+          <h2>PDF 里没有“段落”，只有落在坐标上的字形</h2>
+          <p>一页 PDF 的核心是一段内容流（content stream）：一串操作符，告诉阅读器在什么位置、用什么字体、画什么。</p>
+        </div>
+        <div class="figure">
+          <div class="figure-head"><b>一页的最小绘图指令</b><span>Fig. 02 — content stream</span></div>
+          <pre class="code">q                         <span class="dim">% 保存当前图形状态</span>
+1 0 0 1 72 720 cm         <span class="dim">% 平移坐标系</span>
+BT                        <span class="dim">% 开始文本对象</span>
+  /F1 24 Tf               <span class="dim">% 选择字体与字号</span>
+  (Hello, PDF) Tj         <span class="dim">% 在当前位置显示文字</span>
+ET                        <span class="dim">% 结束文本对象</span>
+Q                         <span class="dim">% 恢复图形状态</span></pre>
+          <div class="caption">坐标原点默认在页面左下角，单位是 1/72 英寸。1 英寸 = 72 PDF 点。</div>
+        </div>
+        <div class="cards">
+          <div class="card pine">
+            <span class="mono">Vector</span>
+            <h3>矢量图形</h3>
+            <p>线条、曲线、填充、裁剪路径。放大不会糊，因为保存的是几何指令，不是像素。</p>
+          </div>
+          <div class="card clay">
+            <span class="mono">Raster</span>
+            <h3>位图图像</h3>
+            <p>照片和扫描件通常是位图：JPEG、JPEG 2000、CCITT 传真或 Flate 压缩的像素。</p>
+          </div>
+          <div class="card amber">
+            <span class="mono">Text</span>
+            <h3>文本对象</h3>
+            <p>字形按坐标放置。阅读器知道每个字在哪，却不一定知道它们属于哪个句子或段落。</p>
+          </div>
+        </div>
+        <div class="aside"><b>这也解释了“选区为什么是矩形”：</b>阅读器根据字形的边界框拼出选区。跨行、跨栏、旋转页面时，矩形会变得不连续，但底层并没有“段落”可供选择。</div>
+      </section>
+
+      <section class="section" id="s04">
+        <div class="sec-head">
+          <div class="sec-num">04</div>
+          <div class="kicker">Text / 文本提取</div>
+          <h2>复制出来的字，为什么有时是乱码</h2>
+          <p>字形不是 Unicode。PDF 里显示的是字体中的字形编号，复制文字时，阅读器需要把编号映射回字符。</p>
+        </div>
+        <div class="pipeline">
+          <div class="pipe"><span class="mono">01</span><b>字形编号</b><p>页面里写的是字体内部的 glyph ID 或字符码，不是“你看到的汉字”。</p></div>
+          <div class="pipe"><span class="mono">02</span><b>字体编码</b><p>简单字体用单字节编码；CID 字体可能用多字节编码，字符集各不相同。</p></div>
+          <div class="pipe"><span class="mono">03</span><b>ToUnicode</b><p>可选的映射表，告诉阅读器“这个字形对应哪个 Unicode 字符”。</p></div>
+          <div class="pipe"><span class="mono">04</span><b>Unicode</b><p>有了映射才能正确复制、搜索；没有映射时，阅读器只能猜。</p></div>
+        </div>
+        <div class="prose">
+          <p>常见情况有三种：</p>
+          <p><strong>第一种，字体带 ToUnicode。</strong>复制、搜索通常正常。多数现代生成器会写入这张表。</p>
+          <p><strong>第二种，字体没有 ToUnicode，或者映射不完整。</strong>阅读器可能根据字形名、编码表或 OCR 猜测，于是出现缺字、错字、顺序颠倒。</p>
+          <p><strong>第三种，扫描件。</strong>页面本身就是一张图，根本没有文本层。想复制或搜索，必须先做 OCR（光学字符识别），再把识别结果作为隐藏文本层叠回去。</p>
+        </div>
+        <div class="note"><b>所以，“PDF 能搜索”不是天生能力：</b>它取决于生成时是否写入文本，以及文本是否可被正确映射。扫描件和“图片型 PDF”是两个不同的问题。</div>
+      </section>
+
+      <section class="section" id="s05">
+        <div class="sec-head">
+          <div class="sec-num">05</div>
+          <div class="kicker">Resources / 资源</div>
+          <h2>字体、图片和压缩，决定了文件的手感</h2>
+          <p>一个 PDF 可能只有几十 KB，也可能有几百 MB。差别通常不在文字，而在字体、图片和编辑历史。</p>
+        </div>
+        <div class="cards">
+          <div class="card pine">
+            <span class="mono">Fonts</span>
+            <h3>字体嵌入</h3>
+            <p>为保证跨设备一致，PDF 可以嵌入字体，甚至只嵌入用到的字形子集。嵌入越完整，文件越大，但越不依赖系统字体。</p>
+          </div>
+          <div class="card clay">
+            <span class="mono">Images</span>
+            <h3>图片压缩</h3>
+            <p>照片常用 JPEG；扫描件常用 CCITT 或 JPEG 2000；图标和线条可能用 Flate。压缩方式不同，清晰度和体积也不同。</p>
+          </div>
+          <div class="card amber">
+            <span class="mono">History</span>
+            <h3>编辑历史</h3>
+            <p>增量更新会保留旧对象。一个被反复修改、签名的 PDF，可能比最终看到的内容大很多。</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>过滤器</th><th>常见用途</th><th>特点</th></tr></thead>
+            <tbody>
+              <tr><td>FlateDecode</td><td>文本、矢量、无损图像</td><td>DEFLATE 压缩，PDF 里最常见的通用压缩。</td></tr>
+              <tr><td>DCTDecode</td><td>JPEG 照片</td><td>有损压缩，体积小，文字边缘可能发虚。</td></tr>
+              <tr><td>JPXDecode</td><td>JPEG 2000 图像</td><td>支持更高压缩比与无损模式，解码更复杂。</td></tr>
+              <tr><td>CCITTFaxDecode</td><td>黑白扫描件</td><td>传真式压缩，适合纯黑白页面。</td></tr>
+              <tr><td>RunLengthDecode</td><td>简单位图</td><td>古老的行程编码，现代文件较少见。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="prose"><p>“文件小”不等于“质量差”，“文件大”也不等于“清晰”。一张被反复转存的高清扫描图，可能又大又糊；一份纯文字 PDF，可能只有几百 KB 却字字清楚。</p></div>
+      </section>
+
+      <section class="section" id="s06">
+        <div class="sec-head">
+          <div class="sec-num">06</div>
+          <div class="kicker">Family / 家族</div>
+          <h2>PDF 不是只有一个版本，而是一整个家族</h2>
+          <p>ISO 32000 是核心规范；在此之上，还有面向归档、印刷、无障碍和工程的子标准。</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>标准</th><th>面向</th><th>关键约束</th></tr></thead>
+            <tbody>
+              <tr><td>PDF/A</td><td>长期归档</td><td>字体嵌入、颜色自包含、减少外部依赖，强调几十年后仍可读。</td></tr>
+              <tr><td>PDF/X</td><td>印刷交换</td><td>固定输出意图、色彩与出血要求，减少印前意外。</td></tr>
+              <tr><td>PDF/UA</td><td>无障碍</td><td>标签结构、阅读顺序、替代文本，让辅助技术能理解内容。</td></tr>
+              <tr><td>PDF/E</td><td>工程文档</td><td>面向 CAD、图层、测量与大型图纸的交换。</td></tr>
+              <tr><td>PDF/VT</td><td>可变数据印刷</td><td>大批量、个性化印刷，如账单、直邮。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>版本</th><th>时间</th><th>代表性变化</th></tr></thead>
+            <tbody>
+              <tr><td>PDF 1.4</td><td>2001</td><td>透明度、JBIG2、更完整的图像模型。</td></tr>
+              <tr><td>PDF 1.5</td><td>2003</td><td>对象流、交叉引用流、可选内容图层。</td></tr>
+              <tr><td>PDF 1.7</td><td>2006</td><td>成为 ISO 32000-1 的基础；AES 加密等扩展。</td></tr>
+              <tr><td>PDF 2.0</td><td>2017</td><td>清理旧特性、增强标签与安全；XFA 不再属于核心规范。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="prose"><p>版本号只是能力上限，不是质量保证。一个标着 1.7 的文件可能很规范，一个标着 2.0 的文件也可能来自粗糙的生成器。</p></div>
+      </section>
+
+      <section class="section" id="s07">
+        <div class="sec-head">
+          <div class="sec-num">07</div>
+          <div class="kicker">Security / 安全</div>
+          <h2>密码、权限和签名，不是同一件事</h2>
+          <p>PDF 支持加密、权限控制、数字签名，也支持 JavaScript 与附件。能力越多，边界越需要说清楚。</p>
+        </div>
+        <div class="cards">
+          <div class="card pine">
+            <span class="mono">Password</span>
+            <h3>两种密码</h3>
+            <p>用户密码用于打开文件；所有者密码用于限制打印、复制、修改。权限是阅读器执行的约定，不等于强加密。</p>
+          </div>
+          <div class="card clay">
+            <span class="mono">Signature</span>
+            <h3>数字签名</h3>
+            <p>签名验证“文件在签署后有没有被改”，通常依赖增量更新与证书链。它证明完整性，不负责给文件加密。</p>
+          </div>
+          <div class="card amber">
+            <span class="mono">Active</span>
+            <h3>活动内容</h3>
+            <p>JavaScript、嵌入文件、外部链接、3D/多媒体都可能存在。打开陌生 PDF 时，限制这些能力是合理的。</p>
+          </div>
+        </div>
+        <div class="prose">
+          <p>还有一个常见误区：把“不能复制”当成“内容安全”。屏幕可以截图，页面可以拍照，权限控制只能提高门槛，不能替代真正的访问控制。</p>
+          <p>对敏感文档，真正有效的是：加密、最小权限、受控分发、审计，以及在撤销访问时让旧文件失效——这些都不是 PDF 格式本身能单独解决的。</p>
+        </div>
+      </section>
+
+      <section class="section" id="s08">
+        <div class="sec-head">
+          <div class="sec-num">08</div>
+          <div class="kicker">Myths / 误解</div>
+          <h2>六个常见误解，一次说清</h2>
+          <p>PDF 太常见，反而容易被当成“一个后缀”。下面这些说法，至少有一半是错的。</p>
+        </div>
+        <div class="myths">
+          <div class="myth"><span class="mono">01</span><b>“PDF 就是一张图片”</b><p>不一定。它可以是矢量图形、可选文本、表单、图层，也可以包含位图。扫描件只是其中一种。</p></div>
+          <div class="myth"><span class="mono">02</span><b>“扫描件也能直接搜索”</b><p>不能。图片没有文本层，必须先 OCR，再把识别结果叠回去。</p></div>
+          <div class="myth"><span class="mono">03</span><b>“改 PDF 会像 Word 一样重排”</b><p>不会。PDF 保存的是固定坐标，编辑通常是在对象层面替换文字或图形，不负责重新流式排版。</p></div>
+          <div class="myth"><span class="mono">04</span><b>“有密码就是加密了”</b><p>打开密码和权限密码不是一回事；权限限制也不等于内容被强加密。</p></div>
+          <div class="myth"><span class="mono">05</span><b>“文件越小越不清晰”</b><p>不一定。纯文字和矢量图可以很小；图片压缩方式才是清晰度的关键。</p></div>
+          <div class="myth"><span class="mono">06</span><b>“PDF 只能看”</b><p>它可以有表单、注释、签名、附件、图层、3D 和音视频。只是并非所有阅读器都支持全部能力。</p></div>
+        </div>
+      </section>
+
+      <section class="section" id="s09">
+        <div class="sec-head">
+          <div class="sec-num">09</div>
+          <div class="kicker">Practice / 这个阅读器</div>
+          <h2>我们选择“只读原文，旁挂阅读数据”</h2>
+          <p>理解了 PDF 的对象与坐标，就能理解这个阅读器的取舍：渲染交给 PDF.js，标注与进度存在本地数据库，原文件不动。</p>
+        </div>
+        <div class="cards">
+          <div class="card pine">
+            <span class="mono">Render</span>
+            <h3>PDF.js 负责还原页面</h3>
+            <p>用 canvas 画页面，用文本层承载选择与搜索，尽量接近浏览器里的 PDF 体验。</p>
+          </div>
+          <div class="card clay">
+            <span class="mono">Annotate</span>
+            <h3>标注是独立数据</h3>
+            <p>高亮、下划线、便签、手绘都存成结构化记录，不写回 PDF，避免破坏原文件与签名。</p>
+          </div>
+          <div class="card amber">
+            <span class="mono">Translate</span>
+            <h3>翻译是可选插件</h3>
+            <p>在线翻译与离线词典都以插件提供，默认不联网；整句翻译后还能逐词回看音标与释义。</p>
+          </div>
+        </div>
+        <div class="prose">
+          <p>这不是“不能编辑 PDF”，而是刻意把“阅读”和“修改原文”分开。原文件是证据，阅读数据是笔记；两者各自保存，互不污染。</p>
+        </div>
+        <div class="quote">“格式的价值，不在于它多复杂，<span>而在于它让多少人不必解释自己看到的是什么。</span>”</div>
+      </section>
+
+      <section class="section" id="glossary">
+        <div class="sec-head">
+          <div class="sec-num">10</div>
+          <div class="kicker">Appendix / 附</div>
+          <h2>一份最小术语表</h2>
+          <p>下次再遇到“PDF 打不开”“复制乱码”“文件太大”，可以先从这些词开始排查。</p>
+        </div>
+        <div class="glossary">
+          <div class="term"><b>对象 Object</b> <span>PDF 的基本存储单元，用编号和代数标识。</span></div>
+          <div class="term"><b>交叉引用表 xref</b> <span>记录对象字节偏移的索引，决定阅读器如何找到对象。</span></div>
+          <div class="term"><b>内容流 Content Stream</b> <span>页面上的绘图指令序列，描述“画什么、画在哪”。</span></div>
+          <div class="term"><b>资源 Resources</b> <span>页面引用的字体、图片、图形状态等外部对象。</span></div>
+          <div class="term"><b>CID 字体</b> <span>用多字节字形编号组织大量字符，常见于中日韩字体。</span></div>
+          <div class="term"><b>ToUnicode</b> <span>字形编号到 Unicode 的映射，文本复制与搜索的关键。</span></div>
+          <div class="term"><b>增量更新</b> <span>在文件末尾追加修改，不重写旧内容；签名与编辑历史依赖它。</span></div>
+          <div class="term"><b>PDF/A</b> <span>面向长期归档的 PDF 子标准，强调自包含与可重现。</span></div>
+          <div class="term"><b>OCR</b> <span>光学字符识别，把扫描图像转成可搜索的文本层。</span></div>
+          <div class="term"><b>线性化</b> <span>为网络快速预览优化过的 PDF 布局，也称 Fast Web View。</span></div>
+        </div>
+        <div class="end-mark"><span>End of notes</span></div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="wrap">
+  <span>PDF Format Notes · 科普向整理</span>
+  <span>Fonts · PingFang / Songti · No external assets</span>
+</footer>
+
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  if (!('IntersectionObserver' in window)) return;
+  var map = {};
+  links.forEach(function (a) {
+    var id = a.getAttribute('href').slice(1);
+    var el = document.getElementById(id);
+    if (el) map[id] = a;
+  });
+  var current = null;
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (!entry.isIntersecting) return;
+      var link = map[entry.target.id];
+      if (!link || link === current) return;
+      if (current) current.classList.remove('active');
+      current = link;
+      current.classList.add('active');
+    });
+  }, { rootMargin: '-15% 0px -70% 0px', threshold: 0 });
+  Object.keys(map).forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) observer.observe(el);
+  });
+})();
+</script>
+</body>
+</html>

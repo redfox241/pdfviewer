@@ -1,0 +1,11 @@
+{
+  "id": "translator-youdao",
+  "name": "有道翻译",
+  "version": "1.0.0",
+  "kind": "translator",
+  "description": "有道智云文本翻译 API v3。需要在有道智云申请应用 ID（AppKey）与应用密钥（AppSecret）；启用时填写凭据。",
+  "author": "PDF Viewer",
+  "provider": "youdao",
+  "endpoint": "https://openapi.youdao.com/api",
+  "targetLang": "zh-CHS"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "translator-ollama",
+  "name": "Ollama 本地翻译（示例）",
+  "version": "1.0.0",
+  "kind": "translator",
+  "description": "完全离线的整句翻译：需要先安装 Ollama，并拉取一个模型（示例为 qwen2.5:7b）。若本机模型名不同，请修改 manifest 后重新打包。",
+  "author": "PDF Viewer",
+  "provider": "openai",
+  "endpoint": "http://127.0.0.1:11434/v1/chat/completions",
+  "model": "qwen2.5:7b",
+  "targetLang": "zh-CN"
+}
