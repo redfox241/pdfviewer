@@ -16,6 +16,12 @@ import {
   type ZoomMode,
 } from "./model";
 import { History } from "./history";
+import {
+  caretOffset,
+  expandWord,
+  type CaretBias,
+  type CharSegment,
+} from "./textselection";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
 
@@ -48,6 +54,30 @@ interface PageView {
   renderTask: any;
   textLayer: any;
   page: PdfPage | null;
+  textIndex: { layer: any; scale: number; rot: number; spans: TextSpanBox[] } | null;
+}
+
+interface TextSpanBox {
+  node: Text;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  horizontal: boolean;
+  rtl: boolean;
+  segments: CharSegment[] | null;
+}
+
+interface TextCaret {
+  node: Text;
+  offset: number;
+}
+
+interface TextSelectDrag {
+  anchor: TextCaret;
+  origin: { x: number; y: number };
+  pointerId: number;
+  moved: boolean;
 }
 
 export interface SelectionGroup {
@@ -140,6 +170,10 @@ export class Viewer {
   private readTimerPage = 0;
   private scrollRaf = 0;
   private navigationTop: number | null = null;
+  private textSelect: TextSelectDrag | null = null;
+  private lastPointer: { x: number; y: number } | null = null;
+  private autoScrollRaf = 0;
+  private skipMouseUpCollect = false;
   private scaleTimer = 0;
   private resizeObserver: ResizeObserver | null = null;
   private pointerDownAt: { x: number; y: number } | null = null;
@@ -156,8 +190,10 @@ export class Viewer {
     this.pagesEl.addEventListener("pointermove", this.onPointerMove);
     this.pagesEl.addEventListener("pointerup", this.onPointerUp);
     this.pagesEl.addEventListener("pointercancel", this.onPointerUp);
+    this.pagesEl.addEventListener("mousedown", this.onMouseDown);
     this.pagesEl.addEventListener("wheel", this.onWheel, { passive: false });
     this.pagesEl.addEventListener("mouseup", this.onMouseUp);
+    this.pagesEl.addEventListener("click", this.onClick);
     this.pagesEl.addEventListener("dblclick", this.onDoubleClick);
     this.scroller.addEventListener("scroll", this.onScroll, { passive: true });
 
@@ -316,6 +352,7 @@ export class Viewer {
         renderTask: null,
         textLayer: null,
         page: null,
+        textIndex: null,
       };
       this.pageViews.set(n, pv);
       this.applyPageBox(pv);
@@ -442,6 +479,10 @@ export class Viewer {
     this.navigationTop = null;
     this.lastVisibleScrollRatio = 0;
     this.drag = null;
+    this.textSelect = null;
+    this.lastPointer = null;
+    this.unbindTextDrag();
+    this.stopAutoScroll();
     this.pagesEl.style.width = "";
     this.scroller.scrollTop = 0;
     this.applySearchHighlightAll();
@@ -595,6 +636,7 @@ export class Viewer {
 
     pv.textLayer?.cancel?.();
     pv.textEl.innerHTML = "";
+    pv.textIndex = null;
     let content: any;
     try {
       content = await page.getTextContent();
@@ -616,6 +658,7 @@ export class Viewer {
     } catch {
       // cancelled
     }
+    pv.textIndex = null;
     this.applySearchHighlight(pv.num);
   }
 
@@ -1261,6 +1304,7 @@ export class Viewer {
   // ------------------------------------------------------------- selection
 
   private onMouseUp = (): void => {
+    if (this.skipMouseUpCollect) return;
     if (
       this.tool === "ink" ||
       this.tool === "box" ||
@@ -1280,6 +1324,299 @@ export class Viewer {
       this.collectSelection();
     }, 0);
   };
+
+  private isTextTool(): boolean {
+    return (
+      this.tool === "select" ||
+      this.tool === "highlight" ||
+      this.tool === "underline" ||
+      this.tool === "strikeout"
+    );
+  }
+
+  private onMouseDown = (e: MouseEvent): void => {
+    // The browser's own hit-testing jumps to the first text run of the document
+    // when the pointer sits between line boxes, so dragging over a paragraph
+    // often swallows everything above the cursor. Carets are resolved from the
+    // laid-out glyphs instead; suppress the native drag-selection here.
+    if (this.textSelect) e.preventDefault();
+  };
+
+  private beginTextSelection(e: PointerEvent): void {
+    const caret = this.caretAtClient(e.clientX, e.clientY, null);
+    if (!caret) return;
+    this.lastPointer = { x: e.clientX, y: e.clientY };
+    this.textSelect = {
+      anchor: caret,
+      origin: { x: e.clientX, y: e.clientY },
+      pointerId: e.pointerId,
+      moved: false,
+    };
+    // Listen on the window instead of capturing the pointer: pointer capture
+    // retargets the compatibility mouse events, which would break the
+    // click/dblclick targets used for word selection. Window listeners keep
+    // the drag alive outside the page without changing event targets.
+    window.addEventListener("pointermove", this.onTextDragMove, true);
+    window.addEventListener("pointerup", this.onTextDragUp, true);
+    window.addEventListener("pointercancel", this.onTextDragUp, true);
+    window.addEventListener("blur", this.onTextDragCancel);
+    if (e.shiftKey) {
+      const start = this.selectionStartCaret();
+      if (start) {
+        this.textSelect.anchor = start;
+        this.textSelect.moved = true;
+        this.applyTextSelection();
+        return;
+      }
+    }
+    window.getSelection()?.removeAllRanges();
+  }
+
+  private onTextDragMove = (e: PointerEvent): void => {
+    this.trackTextSelection(e);
+  };
+
+  private onTextDragUp = (e: PointerEvent): void => {
+    this.finishTextSelection(e.type !== "pointercancel");
+  };
+
+  private onTextDragCancel = (): void => {
+    this.finishTextSelection(false);
+  };
+
+  private unbindTextDrag(): void {
+    window.removeEventListener("pointermove", this.onTextDragMove, true);
+    window.removeEventListener("pointerup", this.onTextDragUp, true);
+    window.removeEventListener("pointercancel", this.onTextDragUp, true);
+    window.removeEventListener("blur", this.onTextDragCancel);
+  }
+
+  private trackTextSelection(e: PointerEvent): void {
+    const ts = this.textSelect;
+    if (!ts || e.pointerId !== ts.pointerId) return;
+    this.lastPointer = { x: e.clientX, y: e.clientY };
+    if (!ts.moved && Math.hypot(e.clientX - ts.origin.x, e.clientY - ts.origin.y) < 3) return;
+    ts.moved = true;
+    this.applyTextSelection();
+    this.queueAutoScroll();
+  }
+
+  private finishTextSelection(collect: boolean): void {
+    if (!this.textSelect) return;
+    const moved = this.textSelect.moved;
+    this.textSelect = null;
+    this.lastPointer = null;
+    this.unbindTextDrag();
+    this.stopAutoScroll();
+    if (!collect || !moved) return;
+    // Let the native mouseup flow run first; it would otherwise re-read and
+    // overwrite the selection while we are still finalising it.
+    this.skipMouseUpCollect = true;
+    window.setTimeout(() => {
+      this.skipMouseUpCollect = false;
+      this.collectSelection();
+    }, 0);
+  }
+
+  private applyTextSelection(): void {
+    const ts = this.textSelect;
+    if (!ts || !this.lastPointer) return;
+    const focus = this.caretAtClient(this.lastPointer.x, this.lastPointer.y, ts.anchor);
+    if (!focus) return;
+    this.setDomSelection(ts.anchor, focus);
+  }
+
+  private setDomSelection(a: TextCaret, b: TextCaret): void {
+    const [start, end] = compareCarets(a, b) <= 0 ? [a, b] : [b, a];
+    const range = document.createRange();
+    try {
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+    } catch {
+      return;
+    }
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  private selectionStartCaret(): TextCaret | null {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+    const node = selection.getRangeAt(0).startContainer;
+    if (!(node instanceof Text)) return null;
+    if (!node.parentElement?.closest(".textLayer")) return null;
+    return { node, offset: selection.getRangeAt(0).startOffset };
+  }
+
+  /** Resolve a client point to the exact glyph under it. */
+  private caretAtClient(clientX: number, clientY: number, anchor: TextCaret | null): TextCaret | null {
+    const pv = this.pageAtClient(clientX, clientY);
+    if (!pv) return null;
+    const spans = this.pageTextSpans(pv);
+    if (!spans.length) return null;
+    const pr = pv.el.getBoundingClientRect();
+    if (pr.width < 1 || pr.height < 1) return null;
+    const x = clientX - pr.left;
+    const y = clientY - pr.top;
+
+    let best: TextSpanBox | null = null;
+    let bestScore = Infinity;
+    for (const span of spans) {
+      const dx = gapTo(x, span.left, span.right);
+      const dy = gapTo(y, span.top, span.bottom);
+      // Vertical proximity dominates so a pointer in the blank space to the
+      // right of a line still belongs to that line, not to a nearer-in-x span
+      // on the line above or below. Ties (overlapping line boxes) go to the
+      // later span, matching paint order and native hit-testing.
+      const score = dy * 1000 + dx;
+      if (score <= bestScore) {
+        bestScore = score;
+        best = span;
+      }
+    }
+    if (!best) return null;
+
+    const segments = this.segmentsFor(pv, best);
+    if (!segments.length) return { node: best.node, offset: 0 };
+    const pointer = { node: best.node, offset: 0 };
+    const nearest = caretOffset(
+      segments,
+      best.node.length,
+      x,
+      y,
+      best.horizontal,
+      best.rtl,
+      "nearest",
+    );
+    let offset = nearest;
+    if (anchor) {
+      pointer.offset = nearest;
+      const bias: CaretBias = compareCarets(anchor, pointer) < 0 ? "end" : "start";
+      offset = caretOffset(segments, best.node.length, x, y, best.horizontal, best.rtl, bias);
+    }
+    return { node: best.node, offset };
+  }
+
+  private pageAtClient(x: number, y: number): PageView | null {
+    const hit = document.elementFromPoint(x, y)?.closest?.(".page") as HTMLElement | null;
+    if (hit) return this.pageViews.get(Number(hit.dataset.page)) ?? null;
+    // Between pages or in the surrounding margin: use the nearest laid-out page.
+    const numbers = this.visible.size ? [...this.visible] : [...this.pageViews.keys()];
+    let best: PageView | null = null;
+    let bestDist = Infinity;
+    for (const n of numbers) {
+      const pv = this.pageViews.get(n);
+      if (!pv) continue;
+      const r = pv.el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      const dx = gapTo(x, r.left, r.right);
+      const dy = gapTo(y, r.top, r.bottom);
+      const dist = dx * dx + dy * dy;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = pv;
+      }
+    }
+    return best;
+  }
+
+  private pageTextSpans(pv: PageView): TextSpanBox[] {
+    const index = pv.textIndex;
+    if (index && index.layer === pv.textLayer && index.scale === this.scale && index.rot === this.textRot()) {
+      return index.spans;
+    }
+    const pr = pv.el.getBoundingClientRect();
+    const spans: TextSpanBox[] = [];
+    if (pr.width > 0 && pv.textLayer) {
+      for (const el of pv.textEl.querySelectorAll<HTMLSpanElement>("span")) {
+        if (el.classList.contains("markedContent") || el.getAttribute("role") === "img") continue;
+        const node = el.firstChild;
+        if (!(node instanceof Text) || !node.data) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 0.5 || r.height < 0.5) continue;
+        spans.push({
+          node,
+          left: r.left - pr.left,
+          top: r.top - pr.top,
+          right: r.right - pr.left,
+          bottom: r.bottom - pr.top,
+          horizontal: textAxis(el, pv.textRot) !== "vertical",
+          rtl: el.dir === "rtl",
+          segments: null,
+        });
+      }
+    }
+    pv.textIndex = { layer: pv.textLayer, scale: this.scale, rot: this.textRot(), spans };
+    return spans;
+  }
+
+  private textRot(): number {
+    return normRot(this.rotationDelta);
+  }
+
+  private segmentsFor(pv: PageView, span: TextSpanBox): CharSegment[] {
+    if (span.segments) return span.segments;
+    const pr = pv.el.getBoundingClientRect();
+    const text = span.node.data;
+    const segments: CharSegment[] = [];
+    const range = document.createRange();
+    for (let i = 0; i < text.length; ) {
+      const cp = text.codePointAt(i) ?? 0;
+      const step = cp > 0xffff ? 2 : 1;
+      range.setStart(span.node, i);
+      range.setEnd(span.node, i + step);
+      const box = range.getBoundingClientRect();
+      const left = box.left - pr.left;
+      const top = box.top - pr.top;
+      const right = box.right - pr.left;
+      const bottom = box.bottom - pr.top;
+      const last = segments[segments.length - 1];
+      if (right - left < 0.05 && bottom - top < 0.05) {
+        // Combining marks and zero-width spaces share the previous glyph box.
+        if (last) last.end = i + step;
+      } else {
+        segments.push({ start: i, end: i + step, left, top, right, bottom });
+      }
+      i += step;
+    }
+    span.segments = segments;
+    return segments;
+  }
+
+  private queueAutoScroll(): void {
+    if (this.autoScrollRaf) return;
+    const point = this.lastPointer;
+    if (!point || !this.textSelect) return;
+    const rect = this.scroller.getBoundingClientRect();
+    const margin = 32;
+    const outside = point.y < rect.top + margin || point.y > rect.bottom - margin;
+    if (!outside) return;
+    this.autoScrollRaf = requestAnimationFrame(this.autoScrollStep);
+  }
+
+  private autoScrollStep = (): void => {
+    this.autoScrollRaf = 0;
+    const point = this.lastPointer;
+    if (!point || !this.textSelect) return;
+    const rect = this.scroller.getBoundingClientRect();
+    const margin = 32;
+    const speed = (distance: number): number => Math.min(36, 8 + distance * 0.6);
+    let delta = 0;
+    if (point.y < rect.top + margin) delta = -speed(rect.top + margin - point.y);
+    else if (point.y > rect.bottom - margin) delta = speed(point.y - (rect.bottom - margin));
+    if (!delta) return;
+    const before = this.scroller.scrollTop;
+    this.scroller.scrollTop = before + delta;
+    if (this.scroller.scrollTop === before) return;
+    this.applyTextSelection();
+    this.autoScrollRaf = requestAnimationFrame(this.autoScrollStep);
+  };
+
+  private stopAutoScroll(): void {
+    if (this.autoScrollRaf) cancelAnimationFrame(this.autoScrollRaf);
+    this.autoScrollRaf = 0;
+  }
 
   private pickAnnotationAtPointer(): void {
     const at = this.pointerDownAt;
@@ -1497,6 +1834,11 @@ export class Viewer {
       this.pagesEl.setPointerCapture(e.pointerId);
       this.drag = { kind: "erase", page: pv, points: [disp], el: null, eraseIds: new Set() };
       this.eraseAt(pv, base);
+      return;
+    }
+
+    if (this.isTextTool() && e.button === 0 && e.pointerType !== "touch") {
+      this.beginTextSelection(e);
     }
   };
 
@@ -1607,7 +1949,29 @@ export class Viewer {
     const ann = this.hitTest(pv, disp);
     if (ann?.type === "note") {
       this.events.onNoteRequest(ann.page, ann.point ?? { x: 0, y: 0 }, ann);
+      return;
     }
+    // Native word selection is suppressed with the native drag selection.
+    if (!this.isTextTool() || e.button !== 0) return;
+    const caret = this.caretAtClient(e.clientX, e.clientY, null);
+    if (!caret) return;
+    const { start, end } = expandWord(caret.node.data, caret.offset);
+    this.setDomSelection(
+      { node: caret.node, offset: start },
+      { node: caret.node, offset: end },
+    );
+    this.collectSelection();
+  };
+
+  private onClick = (e: MouseEvent): void => {
+    if (e.detail < 3 || e.button !== 0 || !this.isTextTool()) return;
+    const caret = this.caretAtClient(e.clientX, e.clientY, null);
+    if (!caret) return;
+    this.setDomSelection(
+      { node: caret.node, offset: 0 },
+      { node: caret.node, offset: caret.node.length },
+    );
+    this.collectSelection();
   };
 
   // ------------------------------------------------------------ search
@@ -1962,6 +2326,20 @@ function bboxQuad(a: { x: number; y: number }, b: { x: number; y: number }): Qua
     w: Math.abs(a.x - b.x),
     h: Math.abs(a.y - b.y),
   };
+}
+
+function gapTo(value: number, from: number, to: number): number {
+  if (value < from) return from - value;
+  if (value > to) return value - to;
+  return 0;
+}
+
+function compareCarets(a: TextCaret, b: TextCaret): number {
+  if (a.node === b.node) return a.offset - b.offset;
+  const position = a.node.compareDocumentPosition(b.node);
+  if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+  if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+  return 0;
 }
 
 function* selectedTextNodes(pages: HTMLElement, range: Range): IterableIterator<Text> {
