@@ -1,6 +1,7 @@
 import "./polyfills";
 import "./styles.css";
 import { api, errorText } from "./bridge";
+import { DocumentSave, removeDocumentTab, SerialQueue } from "./document-operations";
 import {
   COLORS,
   decodeSidecar,
@@ -29,19 +30,23 @@ function icon(name: string, cls = "icon"): string {
   return `<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 }
 
-const viewerEl = $("#viewer");
-const pagesEl = $("#pages");
-const docTitle = $("#doc-title");
-const docName = $("#doc-name");
+const viewerHost = $("#viewer-host");
+const tabList = $("#doc-tab-list");
 const pageInput = $<HTMLInputElement>("#page-input");
 const pageTotal = $("#page-total");
 const zoomLabel = $("#btn-zoom");
 const zoomBadge = $("#zoom-badge");
 const progressFill = $("#progress-fill");
+const appEl = $("#app");
+const workspaceEl = $(".workspace");
+const viewerShell = $(".viewer-shell");
+const progressLine = $(".progress-line");
 const sidebar = $("#sidebar");
 const sidebarBody = $("#sidebar-body");
 const palette = $("#tool-palette");
+const paletteGrip = $<HTMLButtonElement>("#palette-grip");
 const paletteColors = $("#palette-colors");
+const dockOverlay = $("#dock-overlay");
 const emptyEl = $("#empty");
 const loadingEl = $("#loading");
 const searchPanel = $("#search-panel");
@@ -55,27 +60,55 @@ const btnRead = $("#btn-read");
 const btnNight = $("#btn-night");
 const btnPrint = $<HTMLButtonElement>("#btn-print");
 
+interface DocTab {
+  id: string;
+  info: DocInfo;
+  viewer: Viewer;
+  scroller: HTMLElement;
+  pages: HTMLElement;
+  tabEl: HTMLElement;
+  sidecar: SidecarLoad | null;
+  ready: boolean;
+  closing: boolean;
+  readingTimer: number;
+  annotationsTimer: number;
+  scrollSaveTimer: number;
+  readingSave: DocumentSave<ReturnType<Viewer["readingState"]>>;
+  annotationsSave: DocumentSave<Annotation[]>;
+}
+
+type ToolDock = "top" | "left" | "right";
+
+const TOOL_DOCK_KEY = "pdfviewer.toolDock";
+const TOOL_DOCK_ORDER: ToolDock[] = ["top", "left", "right"];
+const TOOL_DOCK_LABELS: Record<ToolDock, string> = {
+  top: "顶部",
+  left: "左侧",
+  right: "右侧",
+};
+
+let toolDock: ToolDock = "top";
+let dockDragging = false;
+let dockTarget: ToolDock | null = null;
+
 let settings: Settings;
 let viewer: Viewer;
+let activeTab: DocTab | null = null;
+const tabs: DocTab[] = [];
 let currentDoc: DocInfo | null = null;
 let sidecar: SidecarLoad | null = null;
 let activeTool: Tool = "select";
 let toolColor = "#ffd84d";
 let pendingSelection: SelectionPayload | null = null;
 let selectionColor = "#ffd84d";
-let readingTimer = 0;
-let annotationsTimer = 0;
-let lastReadingPayload = "";
-let lastAnnotationsPayload = "";
-let readingChain: Promise<void> = Promise.resolve();
-let annotationsChain: Promise<void> = Promise.resolve();
-let scrollSaveTimer = 0;
 let sidebarTab: "thumbs" | "outline" | "notes" = "thumbs";
 let searchResults: SearchResult[] = [];
 let searchIndex = -1;
 let searchCase = false;
 let searchTimer = 0;
 let opening = false;
+let quitting = false;
+const openQueue = new SerialQueue();
 let platform = "web";
 let zoomBadgeTimer = 0;
 let plugins: PluginInfo[] = [];
@@ -105,43 +138,22 @@ async function boot(): Promise<void> {
   void refreshPlugins();
 
   applyTheme();
+  updateNightButton();
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
     if (settings.theme === "system") applyTheme();
   });
 
-  viewer = new Viewer(viewerEl, pagesEl, settings, {
-    onReady: handleReady,
-    onPageChange: handlePageChange,
-    onZoomChange: handleZoomChange,
-    onSelection: handleSelection,
-    onAnnotationSelect: handleAnnotationSelect,
-    onAnnotationsChange: handleAnnotationsChange,
-    onReadChange: handleReadChange,
-    onSearchResults: handleSearchResults,
-    onNoteRequest: handleNoteRequest,
-    onToast: (msg, kind) => {
-      if (kind === "error") void api.logError(`toast: ${msg}`);
-      toast(msg, kind ?? "info");
-    },
-    onDiagnostic: (msg) => void api.logError(`viewer: ${msg}`),
-  });
-
-  // Debug handle for automated checks during development.
-  if (import.meta.env.DEV || location.protocol === "http:") {
-    (window as any).__viewer = viewer;
-  }
-
-  viewer.setNightMode(settings.nightMode);
-  updateNightButton();
   buildPalette();
+  wireToolDock();
+  applyToolDock(readToolDock(), false);
   wireUI();
   wireKeyboard();
   wireFileDrop();
-  window.addEventListener("beforeunload", () => {
-    void flushSave();
-  });
+  wireQuitSave();
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") void flushSave();
+    if (document.visibilityState === "hidden" && !quitting) {
+      void flushSave().catch(reportSaveError);
+    }
   });
   await refreshRecent();
 
@@ -168,44 +180,54 @@ function applyTheme(): void {
 }
 
 function updatePrintButton(): void {
-  btnPrint.disabled = !currentDoc || opening;
+  btnPrint.disabled = !activeTab || !activeTab.ready || opening;
 }
 
 // ---------------------------------------------------------------- events
 
-function handleReady(pages: number): void {
+function handleReady(tab: DocTab, pages: number): void {
+  tab.ready = true;
+  if (activeTab !== tab) return;
   setLoading(false);
   emptyEl.classList.add("hidden");
   palette.classList.remove("hidden");
   pageTotal.textContent = String(pages);
-  updateProgress();
-  updateReadButton();
+  updateProgress(tab);
+  updateReadButton(tab);
   updatePrintButton();
   if (!sidebar.classList.contains("collapsed")) void refreshSidebar();
-  updatePageInput(viewer.getCurrentPage());
-  handleZoomChange(viewer.getScale(), viewer.getZoomMode());
-  viewer.setTool(activeTool, toolColor);
+  updatePageInput(tab.viewer.getCurrentPage());
+  handleZoomChange(tab, tab.viewer.getScale(), tab.viewer.getZoomMode());
+  tab.viewer.setTool(activeTool, toolColor);
 }
 
-function handlePageChange(page: number): void {
-  updatePageInput(page);
-  updateReadButton();
-  viewer.syncThumbStates();
-  scheduleReadingSave(400);
+function handlePageChange(tab: DocTab, page: number): void {
+  if (activeTab === tab) {
+    updatePageInput(page);
+    updateReadButton(tab);
+    tab.viewer.syncThumbStates();
+  }
+  scheduleReadingSave(tab, 400);
 }
 
-function handleZoomChange(scale: number, mode: string): void {
+function handleZoomChange(tab: DocTab, scale: number, mode: string): void {
+  if (activeTab === tab) applyZoomUI(scale, mode, true);
+  scheduleReadingSave(tab, 600);
+}
+
+function applyZoomUI(scale: number, mode: string, flash: boolean): void {
   const pct = Math.round(scale * 75);
   zoomLabel.textContent = `${pct}%`;
+  zoomLabel.dataset.mode = mode;
+  if (!flash) return;
   zoomBadge.textContent = `${pct}%`;
   zoomBadge.classList.remove("hidden");
   window.clearTimeout(zoomBadgeTimer);
   zoomBadgeTimer = window.setTimeout(() => zoomBadge.classList.add("hidden"), 900);
-  zoomLabel.dataset.mode = mode;
-  scheduleReadingSave(600);
 }
 
-function handleSelection(sel: SelectionPayload | null): void {
+function handleSelection(tab: DocTab, sel: SelectionPayload | null): void {
+  if (activeTab !== tab) return;
   if (!sel || !sel.text.trim()) {
     clearPendingSelection();
     return;
@@ -215,7 +237,8 @@ function handleSelection(sel: SelectionPayload | null): void {
   pendingSelection = sel;
 }
 
-function handleAnnotationSelect(ann: Annotation | null, anchor: DOMRect | null): void {
+function handleAnnotationSelect(tab: DocTab, ann: Annotation | null, anchor: DOMRect | null): void {
+  if (activeTab !== tab) return;
   if (!ann) {
     hideAnnotationPopover();
     return;
@@ -223,28 +246,33 @@ function handleAnnotationSelect(ann: Annotation | null, anchor: DOMRect | null):
   showAnnotationPopover(ann, anchor);
 }
 
-function handleAnnotationsChange(): void {
-  scheduleAnnotationsSave(300);
+function handleAnnotationsChange(tab: DocTab): void {
+  scheduleAnnotationsSave(tab, 300);
+  if (activeTab !== tab) return;
   if (sidebarTab === "notes" && !sidebar.classList.contains("collapsed")) {
     void renderNotesPanel();
   }
   hideAnnotationPopover();
 }
 
-function handleReadChange(): void {
-  updateProgress();
-  updateReadButton();
-  viewer.syncThumbStates();
-  scheduleReadingSave(400);
+function handleReadChange(tab: DocTab): void {
+  if (activeTab === tab) {
+    updateProgress(tab);
+    updateReadButton(tab);
+    tab.viewer.syncThumbStates();
+  }
+  scheduleReadingSave(tab, 400);
 }
 
-function handleSearchResults(results: SearchResult[], index: number): void {
+function handleSearchResults(tab: DocTab, results: SearchResult[], index: number): void {
+  if (activeTab !== tab) return;
   searchResults = results;
   searchIndex = index;
   renderSearchResults();
 }
 
-function handleNoteRequest(page: number, point: { x: number; y: number }, ann: Annotation | null): void {
+function handleNoteRequest(tab: DocTab, page: number, point: { x: number; y: number }, ann: Annotation | null): void {
+  if (activeTab !== tab) return;
   openNoteEditor(page, point, ann);
 }
 
@@ -254,55 +282,292 @@ function setLoading(on: boolean): void {
   loadingEl.classList.toggle("hidden", !on);
 }
 
-// ---------------------------------------------------------------- open/close
+// ---------------------------------------------------------------- tabs
 
-async function openDialog(): Promise<void> {
-  if (opening) return;
-  opening = true;
-  try {
-    const info = await api.openDialog();
-    if (!info || !info.token) return;
-    await openInfo(info);
-  } catch (e) {
-    toast(`打开失败：${errorText(e)}`, "error");
-  } finally {
-    opening = false;
+function createTab(info: DocInfo): DocTab {
+  const scroller = document.createElement("main");
+  scroller.className = "viewer tab-viewer";
+  scroller.dataset.tool = activeTool;
+  const pages = document.createElement("div");
+  pages.className = "pages";
+  scroller.append(pages);
+  viewerHost.append(scroller);
+
+  const tabEl = document.createElement("div");
+  tabEl.className = "doc-tab";
+  tabEl.title = info.path;
+  tabEl.setAttribute("role", "tab");
+  tabEl.innerHTML = `${icon("file")}<span class="doc-tab-name"></span><button class="doc-tab-close" type="button" title="关闭 (⌘W)">${icon("close")}</button>`;
+  const nameEl = tabEl.querySelector(".doc-tab-name")!;
+  nameEl.textContent = info.name;
+
+  const tab: DocTab = {
+    id: uid(),
+    info,
+    viewer: null as unknown as Viewer,
+    scroller,
+    pages,
+    tabEl,
+    sidecar: null,
+    ready: false,
+    closing: false,
+    readingTimer: 0,
+    annotationsTimer: 0,
+    scrollSaveTimer: 0,
+    readingSave: new DocumentSave((payload) => api.saveReading(info.token, payload, tab.viewer.getPages())),
+    annotationsSave: new DocumentSave((payload) => api.saveAnnotations(info.token, payload)),
+  };
+
+  tab.viewer = new Viewer(scroller, pages, settings, {
+    onReady: (count) => handleReady(tab, count),
+    onPageChange: (page) => handlePageChange(tab, page),
+    onZoomChange: (scale, mode) => handleZoomChange(tab, scale, mode),
+    onSelection: (sel) => handleSelection(tab, sel),
+    onAnnotationSelect: (ann, anchor) => handleAnnotationSelect(tab, ann, anchor),
+    onAnnotationsChange: () => handleAnnotationsChange(tab),
+    onReadChange: () => handleReadChange(tab),
+    onSearchResults: (results, index) => handleSearchResults(tab, results, index),
+    onNoteRequest: (page, point, ann) => handleNoteRequest(tab, page, point, ann),
+    onToast: (msg, kind) => {
+      if (kind === "error") void api.logError(`toast: ${msg}`);
+      toast(msg, kind ?? "info");
+    },
+    onDiagnostic: (msg) => void api.logError(`viewer ${info.name}: ${msg}`),
+  });
+  tab.viewer.setNightMode(settings.nightMode);
+
+  scroller.addEventListener(
+    "scroll",
+    () => {
+      window.clearTimeout(tab.scrollSaveTimer);
+      tab.scrollSaveTimer = window.setTimeout(() => scheduleReadingSave(tab, 50), 1200);
+    },
+    { passive: true },
+  );
+
+  tabEl.addEventListener("click", () => activateTab(tab));
+  tabEl.addEventListener("auxclick", (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      void closeTab(tab);
+    }
+  });
+  tabEl.querySelector(".doc-tab-close")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void closeTab(tab);
+  });
+
+  return tab;
+}
+
+function renderTabs(): void {
+  tabList.innerHTML = "";
+  for (const tab of tabs) {
+    const isActive = tab === activeTab;
+    tab.tabEl.classList.toggle("active", isActive);
+    tab.tabEl.setAttribute("aria-selected", isActive ? "true" : "false");
+    tabList.append(tab.tabEl);
+  }
+  const activeEl = activeTab?.tabEl;
+  activeEl?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+function activateTab(tab: DocTab): void {
+  if (tab.closing) return;
+  if (activeTab !== tab) {
+    if (activeTab) {
+      if (!searchPanel.classList.contains("hidden")) closeSearch();
+      hideContextMenu();
+      hideTransCard();
+      hideAnnotationPopover();
+      activeTab.viewer.scrollRatio();
+      activeTab.scroller.classList.remove("active");
+      activeTab.tabEl.classList.remove("active");
+    }
+    activeTab = tab;
+    viewer = tab.viewer;
+    currentDoc = tab.info;
+    sidecar = tab.sidecar;
+    clearPendingSelection();
+    tab.scroller.classList.add("active");
+    tab.tabEl.classList.add("active");
+  }
+
+  renderTabs();
+  syncActiveUI(tab);
+  setLoading(!tab.ready);
+  if (tab.ready) {
+    viewer.setTool(activeTool, toolColor);
+    viewer.setNightMode(settings.nightMode);
+  }
+  if (!sidebar.classList.contains("collapsed")) void refreshSidebar();
+
+  // Debug handle for automated checks during development.
+  if (import.meta.env.DEV || location.protocol === "http:") {
+    (window as any).__viewer = viewer;
   }
 }
 
+function syncActiveUI(tab: DocTab): void {
+  const v = tab.viewer;
+  emptyEl.classList.add("hidden");
+  updatePrintButton();
+  if (!tab.ready) {
+    palette.classList.add("hidden");
+    pageTotal.textContent = "…";
+    pageInput.value = "1";
+    progressFill.style.width = "0%";
+    btnRead.classList.remove("active");
+    return;
+  }
+  palette.classList.remove("hidden");
+  pageTotal.textContent = String(v.getPages());
+  updatePageInput(v.getCurrentPage());
+  applyZoomUI(v.getScale(), v.getZoomMode(), false);
+  updateProgress(tab);
+  updateReadButton(tab);
+}
+
+function showEmptyState(): void {
+  activeTab = null;
+  currentDoc = null;
+  sidecar = null;
+  clearPendingSelection();
+  hideContextMenu();
+  hideTransCard();
+  hideAnnotationPopover();
+  resetSearchUI();
+  setLoading(false);
+  emptyEl.classList.remove("hidden");
+  palette.classList.add("hidden");
+  pageTotal.textContent = "0";
+  pageInput.value = "1";
+  progressFill.style.width = "0%";
+  btnRead.classList.remove("active");
+  sidebarBody.innerHTML = "";
+  updatePrintButton();
+  renderTabs();
+  void refreshRecent();
+}
+
+function resetSearchUI(): void {
+  searchPanel.classList.add("hidden");
+  window.clearTimeout(searchTimer);
+  searchInput.value = "";
+  searchResultsEl.innerHTML = "";
+  searchCount.textContent = "";
+  searchResults = [];
+  searchIndex = -1;
+}
+
+async function closeTab(tab: DocTab, save = true): Promise<void> {
+  if (tab.closing || quitting) return;
+  tab.closing = true;
+  try {
+    if (save && tab.ready) await flushTabUntilSaved(tab);
+  } catch (e) {
+    tab.closing = false;
+    if (!activeTab) activateTab(tab);
+    toast(`未关闭「${tab.info.name}」：${errorText(e)}`, "error", {
+      label: "重试关闭",
+      onClick: () => void closeTab(tab),
+    });
+    return;
+  }
+
+  const wasActive = activeTab === tab;
+  if (wasActive && !searchPanel.classList.contains("hidden")) closeSearch();
+  const next = removeDocumentTab(tabs, tab, activeTab, (candidate) => !candidate.closing);
+  window.clearTimeout(tab.readingTimer);
+  window.clearTimeout(tab.annotationsTimer);
+  window.clearTimeout(tab.scrollSaveTimer);
+
+  const pages = tab.ready ? tab.viewer.getPages() : 0;
+  const progress = tab.ready ? tab.viewer.getProgress() : 0;
+  if (wasActive) activeTab = null;
+  tab.viewer.destroy();
+  tab.scroller.remove();
+  tab.tabEl.remove();
+  if (wasActive) {
+    if (next) activateTab(next);
+    else showEmptyState();
+  } else {
+    renderTabs();
+  }
+
+  if (tab.ready) {
+    try {
+      await api.updateProgress(tab.info.token, pages, progress);
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    await api.closeDocument(tab.info.token);
+  } catch {
+    /* ignore */
+  }
+
+  await refreshRecent();
+}
+
+// ---------------------------------------------------------------- open/close
+
+function queueOpen(load: () => Promise<DocInfo>, showLoading = false): Promise<void> {
+  return openQueue.run(async () => {
+    if (quitting) return;
+    opening = true;
+    updatePrintButton();
+    if (showLoading) setLoading(true);
+    try {
+      const info = await load();
+      if (info?.token) {
+        if (quitting) await api.closeDocument(info.token);
+        else await openInfo(info);
+      }
+    } catch (e) {
+      toast(`打开失败：${errorText(e)}`, "error");
+    } finally {
+      opening = false;
+      setLoading(!!activeTab && !activeTab.ready);
+      updatePrintButton();
+    }
+  });
+}
+
+function openDialog(): Promise<void> {
+  return queueOpen(api.openDialog);
+}
+
 async function openPath(path: string): Promise<void> {
-  if (opening) return;
   if (!path.toLowerCase().endsWith(".pdf")) {
     toast("只能打开 PDF 文件", "error");
     return;
   }
-  opening = true;
-  setLoading(true);
-  try {
-    const info = await api.openDocument(path);
-    if (info?.token) await openInfo(info);
-  } catch (e) {
-    toast(`打开失败：${errorText(e)}`, "error");
-    if (!currentDoc) setLoading(false);
-  } finally {
-    opening = false;
-  }
+  await queueOpen(() => api.openDocument(path), true);
 }
 
 async function openInfo(info: DocInfo): Promise<void> {
-  await closeCurrent();
-  setLoading(true);
-  clearPendingSelection();
+  const existing = tabs.find((t) => t.info.path === info.path);
+  if (existing) {
+    try {
+      await api.closeDocument(info.token);
+    } catch {
+      /* ignore */
+    }
+    activateTab(existing);
+    return;
+  }
+
+  hideContextMenu();
+  hideTransCard();
   hideAnnotationPopover();
   hideSearch();
-  currentDoc = info;
-  sidecar = null;
-  lastReadingPayload = "";
-  lastAnnotationsPayload = "";
-  docName.textContent = info.name;
-  docTitle.title = info.path;
-  pageInput.value = "1";
-  pageTotal.textContent = "…";
+  setLoading(true);
+
+  const tab = createTab(info);
+  tabs.push(tab);
+  activateTab(tab);
 
   let load: SidecarLoad;
   try {
@@ -311,8 +576,10 @@ async function openInfo(info: DocInfo): Promise<void> {
     toast(`读取标注失败：${errorText(e)}`, "error");
     load = { data: "", path: "", portable: false, fingerprint: info.fingerprint, warning: "" };
   }
-  sidecar = load;
+  tab.sidecar = load;
+  if (activeTab === tab) sidecar = load;
   if (load.warning) toast(load.warning, "error");
+  if (tab.closing) return;
 
   const decoded = decodeSidecar(load);
   if (decoded.fingerprint && decoded.fingerprint !== info.fingerprint) {
@@ -320,29 +587,20 @@ async function openInfo(info: DocInfo): Promise<void> {
   }
 
   try {
-    await viewer.open(info, decoded.reading, decoded.annotations);
+    await tab.viewer.open(info, decoded.reading, decoded.annotations);
   } catch (e) {
-    setLoading(false);
+    if (tab.closing) return;
     toast(`无法渲染该 PDF：${errorText(e)}`, "error");
-    currentDoc = null;
-    docName.textContent = "未打开文档";
-    docTitle.title = "";
-    emptyEl.classList.remove("hidden");
-    palette.classList.add("hidden");
-    updatePrintButton();
-    try {
-      await api.closeDocument(info.token);
-    } catch {
-      /* ignore */
-    }
+    await closeTab(tab, false);
     return;
   }
-  lastAnnotationsPayload = JSON.stringify(viewer.getAnnotations());
-  scheduleReadingSave(600);
+  if (tab.closing) return;
+  tab.annotationsSave.seed(tab.viewer.getAnnotations());
+  scheduleReadingSave(tab, 600);
 
   if (import.meta.env.DEV || location.protocol === "http:") {
     window.setTimeout(() => {
-      void viewer
+      void tab.viewer
         .diagnostics()
         .then((d) => console.info("pdf diagnostics", d))
         .catch((e) => console.warn("pdf diagnostics failed", e));
@@ -350,46 +608,12 @@ async function openInfo(info: DocInfo): Promise<void> {
   }
 }
 
-async function closeCurrent(save = true): Promise<void> {
-  if (!currentDoc) return;
-  window.clearTimeout(readingTimer);
-  readingTimer = 0;
-  window.clearTimeout(annotationsTimer);
-  annotationsTimer = 0;
-  if (save) await flushSave();
-  const doc = currentDoc;
-  currentDoc = null;
-  updatePrintButton();
-  try {
-    await api.updateProgress(doc.token, viewer.getPages(), viewer.getProgress());
-    await api.closeDocument(doc.token);
-  } catch {
-    /* ignore */
-  }
-  viewer.close();
-  sidecar = null;
-  lastReadingPayload = "";
-  lastAnnotationsPayload = "";
-  clearPendingSelection();
-  hideAnnotationPopover();
-  hideSearch();
-  emptyEl.classList.remove("hidden");
-  palette.classList.add("hidden");
-  docName.textContent = "未打开文档";
-  docTitle.title = "";
-  pageTotal.textContent = "0";
-  pageInput.value = "1";
-  progressFill.style.width = "0%";
-  sidebarBody.innerHTML = "";
-  await refreshRecent();
-}
-
 async function reloadCurrent(): Promise<void> {
-  const doc = currentDoc;
-  if (!doc) return;
-  const path = doc.path;
+  const tab = activeTab;
+  if (!tab) return;
+  const path = tab.info.path;
   // Do not flush: the point of reloading is to pick up the just-imported data.
-  await closeCurrent(false);
+  await closeTab(tab, false);
   await openPath(path);
 }
 
@@ -399,60 +623,94 @@ async function reloadCurrent(): Promise<void> {
 // independently. SQLite updates rows in place, so page turns and scroll idle
 // no longer rewrite a JSON file (and its .bak) every time.
 
-function scheduleReadingSave(delay = 600): void {
-  if (!currentDoc) return;
-  window.clearTimeout(readingTimer);
-  readingTimer = window.setTimeout(() => void flushReading(), delay);
+function scheduleReadingSave(tab: DocTab | null = activeTab, delay = 600): void {
+  if (!tab || tab.closing || quitting) return;
+  window.clearTimeout(tab.readingTimer);
+  tab.readingTimer = window.setTimeout(() => {
+    if (!tab.closing && !quitting) void flushReading(tab).catch(reportSaveError);
+  }, delay);
 }
 
-function flushReading(): Promise<void> {
-  const doc = currentDoc;
-  if (!doc) return Promise.resolve();
-  window.clearTimeout(readingTimer);
-  readingTimer = 0;
-  const payload = JSON.stringify(viewer.readingState());
-  if (payload === lastReadingPayload) return readingChain;
-  lastReadingPayload = payload;
-  const pages = viewer.getPages();
-  readingChain = readingChain.then(async () => {
-    try {
-      await api.saveReading(doc.token, payload, pages);
-    } catch (e) {
-      lastReadingPayload = "";
-      toast(`保存阅读进度失败：${errorText(e)}`, "error");
-    }
-  });
-  void api.updateProgress(doc.token, pages, viewer.getProgress()).catch(() => undefined);
-  return readingChain;
+async function flushReading(tab: DocTab): Promise<void> {
+  window.clearTimeout(tab.readingTimer);
+  const state = tab.viewer.readingState();
+  const changed = !tab.readingSave.matches(state);
+  try {
+    await tab.readingSave.flush(state);
+  } catch (e) {
+    throw new Error(`保存阅读进度失败：${errorText(e)}`);
+  }
+  if (changed && tabs.includes(tab)) {
+    void api.updateProgress(tab.info.token, tab.viewer.getPages(), tab.viewer.getProgress())
+      .catch(() => undefined);
+  }
 }
 
-function scheduleAnnotationsSave(delay = 400): void {
-  if (!currentDoc) return;
-  window.clearTimeout(annotationsTimer);
-  annotationsTimer = window.setTimeout(() => void flushAnnotations(), delay);
+function scheduleAnnotationsSave(tab: DocTab | null = activeTab, delay = 400): void {
+  if (!tab || tab.closing || quitting) return;
+  window.clearTimeout(tab.annotationsTimer);
+  tab.annotationsTimer = window.setTimeout(() => {
+    if (!tab.closing && !quitting) void flushAnnotations(tab).catch(reportSaveError);
+  }, delay);
 }
 
-function flushAnnotations(): Promise<void> {
-  const doc = currentDoc;
-  if (!doc) return Promise.resolve();
-  window.clearTimeout(annotationsTimer);
-  annotationsTimer = 0;
-  const payload = JSON.stringify(viewer.getAnnotations());
-  if (payload === lastAnnotationsPayload) return annotationsChain;
-  lastAnnotationsPayload = payload;
-  annotationsChain = annotationsChain.then(async () => {
-    try {
-      await api.saveAnnotations(doc.token, payload);
-    } catch (e) {
-      lastAnnotationsPayload = "";
-      toast(`保存标注失败：${errorText(e)}`, "error");
-    }
-  });
-  return annotationsChain;
+async function flushAnnotations(tab: DocTab): Promise<void> {
+  window.clearTimeout(tab.annotationsTimer);
+  try {
+    await tab.annotationsSave.flush(tab.viewer.getAnnotations());
+  } catch (e) {
+    throw new Error(`保存标注失败：${errorText(e)}`);
+  }
+}
+
+async function waitForSaves(saves: Promise<void>[]): Promise<void> {
+  for (const result of await Promise.allSettled(saves)) {
+    if (result.status === "rejected") throw result.reason;
+  }
+}
+
+async function flushTabUntilSaved(tab: DocTab): Promise<void> {
+  while (tabs.includes(tab)) {
+    await waitForSaves([flushReading(tab), flushAnnotations(tab)]);
+    if (tab.readingSave.matches(tab.viewer.readingState()) &&
+        tab.annotationsSave.matches(tab.viewer.getAnnotations())) return;
+  }
 }
 
 function flushSave(): Promise<void> {
-  return Promise.all([flushReading(), flushAnnotations()]).then(() => undefined);
+  return waitForSaves(tabs.filter((t) => t.ready).map(flushTabUntilSaved));
+}
+
+function reportSaveError(e: unknown): void {
+  toast(errorText(e), "error");
+}
+
+function wireQuitSave(): void {
+  const rt = (window as Window & { runtime?: {
+    EventsOn?: (event: string, callback: () => void) => void;
+  } }).runtime;
+  if (!rt?.EventsOn) return;
+  rt.EventsOn("pdfviewer:save-before-quit", () => void saveBeforeQuit());
+  void api.enableSaveOnQuit().catch(() => undefined);
+}
+
+async function saveBeforeQuit(): Promise<void> {
+  if (quitting) return;
+  quitting = true;
+  appEl.inert = true;
+  modalHost.inert = true;
+  try {
+    await flushSave();
+    await api.quitAfterSave();
+  } catch (e) {
+    quitting = false;
+    appEl.inert = false;
+    modalHost.inert = false;
+    toast(`未退出：${errorText(e)}`, "error", {
+      label: "重试退出",
+      onClick: () => void saveBeforeQuit(),
+    });
+  }
 }
 
 // ---------------------------------------------------------------- toolbar
@@ -461,14 +719,22 @@ function updatePageInput(page: number): void {
   if (document.activeElement !== pageInput) pageInput.value = String(page);
 }
 
-function updateProgress(): void {
-  const pages = viewer.getPages();
-  const pct = pages ? (viewer.getReadPages().length / pages) * 100 : 0;
+function updateProgress(tab: DocTab | null = activeTab): void {
+  if (!tab) {
+    progressFill.style.width = "0%";
+    return;
+  }
+  const pages = tab.viewer.getPages();
+  const pct = pages ? (tab.viewer.getReadPages().length / pages) * 100 : 0;
   progressFill.style.width = `${pct.toFixed(2)}%`;
 }
 
-function updateReadButton(): void {
-  const read = viewer.getReadPages().includes(viewer.getCurrentPage());
+function updateReadButton(tab: DocTab | null = activeTab): void {
+  if (!tab) {
+    btnRead.classList.remove("active");
+    return;
+  }
+  const read = tab.viewer.getReadPages().includes(tab.viewer.getCurrentPage());
   btnRead.classList.toggle("active", read);
 }
 
@@ -478,10 +744,116 @@ function updateNightButton(): void {
 }
 
 function cycleZoomMode(): void {
+  if (!activeTab) return;
   const mode = viewer.getZoomMode();
   if (mode === "fit-width") viewer.fitPage();
   else if (mode === "fit-page") viewer.actualSize();
   else viewer.fitWidth();
+}
+
+// ---------------------------------------------------------------- tool dock
+
+function readToolDock(): ToolDock {
+  try {
+    const saved = localStorage.getItem(TOOL_DOCK_KEY);
+    if (saved === "top" || saved === "left" || saved === "right") return saved;
+  } catch {
+    // Storage can be unavailable; fall back to the top strip.
+  }
+  return "top";
+}
+
+function applyToolDock(dock: ToolDock, persist = true): void {
+  toolDock = dock;
+  appEl.dataset.toolDock = dock;
+
+  if (dock === "top") {
+    progressLine.before(palette);
+  } else if (dock === "left") {
+    workspaceEl.insertBefore(palette, viewerShell);
+  } else {
+    workspaceEl.append(palette);
+  }
+
+  const label = TOOL_DOCK_LABELS[dock];
+  paletteGrip.title = `拖动工具栏（当前：${label}）· 双击循环切换`;
+  paletteGrip.setAttribute("aria-label", `拖动工具栏，当前停靠在${label}`);
+
+  if (persist) {
+    try {
+      localStorage.setItem(TOOL_DOCK_KEY, dock);
+    } catch {
+      // Non-fatal: the dock still moves for this session.
+    }
+  }
+}
+
+function cycleToolDock(): void {
+  const next = (TOOL_DOCK_ORDER.indexOf(toolDock) + 1) % TOOL_DOCK_ORDER.length;
+  applyToolDock(TOOL_DOCK_ORDER[next]);
+}
+
+function dockFromPoint(x: number, y: number): ToolDock | null {
+  const zones = dockOverlay.querySelectorAll<HTMLElement>(".dock-zone");
+  for (const zone of zones) {
+    const r = zone.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+      return zone.dataset.dock as ToolDock;
+    }
+  }
+  return null;
+}
+
+function updateDockHighlight(target: ToolDock | null): void {
+  dockTarget = target;
+  dockOverlay.querySelectorAll<HTMLElement>(".dock-zone").forEach((zone) => {
+    zone.classList.toggle("active", zone.dataset.dock === target);
+  });
+}
+
+function finishToolDockDrag(commit: boolean): void {
+  if (!dockDragging) return;
+  const target = dockTarget;
+  dockDragging = false;
+  dockOverlay.classList.add("hidden");
+  document.body.classList.remove("dock-dragging");
+  palette.classList.remove("dragging");
+  updateDockHighlight(null);
+  // Re-docking to the same edge would reinsert the strip in the DOM and
+  // cancel the click/double-click that is about to be delivered to the grip.
+  if (commit && target && target !== toolDock) applyToolDock(target);
+}
+
+function wireToolDock(): void {
+  paletteGrip.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    dockDragging = true;
+    updateDockHighlight(null);
+    dockOverlay.classList.remove("hidden");
+    document.body.classList.add("dock-dragging");
+    palette.classList.add("dragging");
+    paletteGrip.setPointerCapture?.(e.pointerId);
+    updateDockHighlight(dockFromPoint(e.clientX, e.clientY));
+  });
+
+  paletteGrip.addEventListener("pointermove", (e) => {
+    if (!dockDragging) return;
+    updateDockHighlight(dockFromPoint(e.clientX, e.clientY));
+  });
+
+  paletteGrip.addEventListener("pointerup", (e) => {
+    if (!dockDragging) return;
+    updateDockHighlight(dockFromPoint(e.clientX, e.clientY));
+    finishToolDockDrag(true);
+  });
+
+  paletteGrip.addEventListener("pointercancel", () => finishToolDockDrag(false));
+  paletteGrip.addEventListener("lostpointercapture", () => finishToolDockDrag(false));
+
+  paletteGrip.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    cycleToolDock();
+  });
 }
 
 function buildPalette(): void {
@@ -495,7 +867,7 @@ function buildPalette(): void {
     b.addEventListener("click", () => {
       selectionColor = c.value;
       toolColor = c.value;
-      viewer.setToolColor(c.value);
+      activeTab?.viewer.setToolColor(c.value);
       updatePalette();
       if (activeTool === "select" || !isColorTool(activeTool)) {
         setTool("highlight");
@@ -514,7 +886,7 @@ function isColorTool(tool: Tool): boolean {
 
 function setTool(tool: Tool): void {
   activeTool = tool;
-  viewer.setTool(tool, toolColor);
+  activeTab?.viewer.setTool(tool, toolColor);
   updatePalette();
 }
 
@@ -1106,7 +1478,7 @@ function retryTransAction(): void {
 document.addEventListener("contextmenu", (e) => {
   if (e.defaultPrevented) return;
   const target = e.target as Node | null;
-  if (!target || !pagesEl.contains(target) || !viewer) return;
+  if (!target || !activeTab || !activeTab.pages.contains(target)) return;
   // Pin the payload captured on mouseup. Re-reading the live DOM selection
   // here can return a different word after WebKit handles the right-click.
   const sel = pendingSelection ?? viewer.readSelection();
@@ -1664,7 +2036,11 @@ function openNoteEditor(
 // ---------------------------------------------------------------- sidebar
 
 async function refreshSidebar(): Promise<void> {
-  if (!currentDoc) {
+  if (!activeTab) {
+    sidebarBody.innerHTML = "";
+    return;
+  }
+  if (!activeTab.ready) {
     sidebarBody.innerHTML = "";
     return;
   }
@@ -1765,7 +2141,7 @@ function closeSidebar(): void {
 // ---------------------------------------------------------------- search
 
 function openSearch(): void {
-  if (!currentDoc) {
+  if (!activeTab) {
     toast("请先打开一份 PDF");
     return;
   }
@@ -1787,7 +2163,7 @@ function closeSearch(): void {
   searchCount.textContent = "";
   searchResults = [];
   searchIndex = -1;
-  viewer.clearSearch();
+  activeTab?.viewer.clearSearch();
 }
 
 function hideSearch(): void {
@@ -1800,11 +2176,11 @@ function runSearchDebounced(): void {
   if (!q) {
     searchCount.textContent = "";
     searchResultsEl.innerHTML = "";
-    viewer.clearSearch();
+    activeTab?.viewer.clearSearch();
     return;
   }
   searchTimer = window.setTimeout(() => {
-    void viewer.runSearch(q, searchCase);
+    void activeTab?.viewer.runSearch(q, searchCase);
   }, 220);
 }
 
@@ -1829,7 +2205,7 @@ function renderSearchResults(): void {
     snip.className = "hit-snippet";
     snip.textContent = r.snippet;
     row.append(page, snip);
-    row.addEventListener("click", () => viewer.gotoSearchResult(i));
+    row.addEventListener("click", () => activeTab?.viewer.gotoSearchResult(i));
     searchResultsEl.append(row);
   });
   const active = searchResultsEl.querySelector<HTMLElement>(".search-hit.active");
@@ -2200,11 +2576,13 @@ function openSettings(focusPlugins = false): void {
           };
           settings = next;
           applyTheme();
-          viewer.setSettings(next);
+          for (const tab of tabs) {
+            tab.viewer.setSettings(next);
+            tab.viewer.setToolColor(next.highlightColor);
+          }
           updateNightButton();
           selectionColor = next.highlightColor;
           toolColor = next.highlightColor;
-          viewer.setToolColor(next.highlightColor);
           try {
             await api.saveSettings(next);
             toast("设置已保存");
@@ -2358,24 +2736,25 @@ function wireUI(): void {
 
   $("#btn-open").addEventListener("click", () => void openDialog());
   $("#btn-empty-open").addEventListener("click", () => void openDialog());
+  $("#btn-tab-new").addEventListener("click", () => void openDialog());
 
-  $("#btn-prev").addEventListener("click", () => viewer.prevPage());
-  $("#btn-next").addEventListener("click", () => viewer.nextPage());
+  $("#btn-prev").addEventListener("click", () => activeTab?.viewer.prevPage());
+  $("#btn-next").addEventListener("click", () => activeTab?.viewer.nextPage());
   pageInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
-      viewer.goToPage(Number(pageInput.value) || 1);
+      activeTab?.viewer.goToPage(Number(pageInput.value) || 1);
       pageInput.blur();
     }
   });
   pageInput.addEventListener("blur", () => {
-    viewer.goToPage(Number(pageInput.value) || 1);
+    activeTab?.viewer.goToPage(Number(pageInput.value) || 1);
   });
 
-  $("#btn-zoom-out").addEventListener("click", () => viewer.zoomBy(1 / 1.2));
-  $("#btn-zoom-in").addEventListener("click", () => viewer.zoomBy(1.2));
+  $("#btn-zoom-out").addEventListener("click", () => activeTab?.viewer.zoomBy(1 / 1.2));
+  $("#btn-zoom-in").addEventListener("click", () => activeTab?.viewer.zoomBy(1.2));
   $("#btn-zoom").addEventListener("click", cycleZoomMode);
-  $("#btn-fit").addEventListener("click", () => viewer.fitWidth());
-  $("#btn-rotate").addEventListener("click", () => viewer.rotate(90));
+  $("#btn-fit").addEventListener("click", () => activeTab?.viewer.fitWidth());
+  $("#btn-rotate").addEventListener("click", () => activeTab?.viewer.rotate(90));
 
   $("#btn-search").addEventListener("click", () => {
     if (searchPanel.classList.contains("hidden")) openSearch();
@@ -2383,16 +2762,11 @@ function wireUI(): void {
   });
   $("#btn-night").addEventListener("click", () => {
     settings.nightMode = !settings.nightMode;
-    // Debug handle for automated checks during development.
-  if (import.meta.env.DEV || location.protocol === "http:") {
-    (window as any).__viewer = viewer;
-  }
-
-  viewer.setNightMode(settings.nightMode);
+    for (const tab of tabs) tab.viewer.setNightMode(settings.nightMode);
     updateNightButton();
     void api.saveSettings(settings).catch(() => undefined);
   });
-  btnRead.addEventListener("click", () => viewer.toggleReadCurrent());
+  btnRead.addEventListener("click", () => activeTab?.viewer.toggleReadCurrent());
   btnPrint.addEventListener("click", () => openPrintPanel());
 
   $("#btn-sidebar").addEventListener("click", () => {
@@ -2410,26 +2784,21 @@ function wireUI(): void {
   searchInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      if (e.shiftKey) viewer.prevSearchResult();
-      else viewer.nextSearchResult();
+      if (e.shiftKey) activeTab?.viewer.prevSearchResult();
+      else activeTab?.viewer.nextSearchResult();
     }
     if (e.key === "Escape") {
       e.preventDefault();
       closeSearch();
     }
   });
-  $("#search-prev").addEventListener("click", () => viewer.prevSearchResult());
-  $("#search-next").addEventListener("click", () => viewer.nextSearchResult());
+  $("#search-prev").addEventListener("click", () => activeTab?.viewer.prevSearchResult());
+  $("#search-next").addEventListener("click", () => activeTab?.viewer.nextSearchResult());
   $("#search-close").addEventListener("click", closeSearch);
   $("#search-case").addEventListener("click", () => {
     searchCase = !searchCase;
     $("#search-case").classList.toggle("active", searchCase);
     runSearchDebounced();
-  });
-
-  viewerEl.addEventListener("scroll", () => {
-    window.clearTimeout(scrollSaveTimer);
-    scrollSaveTimer = window.setTimeout(() => scheduleReadingSave(50), 1200);
   });
 
   window.addEventListener("resize", () => {
@@ -2441,6 +2810,7 @@ function wireUI(): void {
 
 function wireKeyboard(): void {
   window.addEventListener("keydown", (e) => {
+    if (quitting) return;
     const mod = e.metaKey || e.ctrlKey;
     const key = e.key;
     const typing =
@@ -2471,6 +2841,11 @@ function wireKeyboard(): void {
       void openDialog();
       return;
     }
+    if (mod && key.toLowerCase() === "w") {
+      e.preventDefault();
+      if (activeTab) void closeTab(activeTab);
+      return;
+    }
     if (mod && key.toLowerCase() === "f") {
       e.preventDefault();
       openSearch();
@@ -2490,62 +2865,63 @@ function wireKeyboard(): void {
     }
     if (mod && (key === "=" || key === "+")) {
       e.preventDefault();
-      viewer.zoomBy(1.2);
+      activeTab?.viewer.zoomBy(1.2);
       return;
     }
     if (mod && key === "-") {
       e.preventDefault();
-      viewer.zoomBy(1 / 1.2);
+      activeTab?.viewer.zoomBy(1 / 1.2);
       return;
     }
     if (mod && key === "0") {
       e.preventDefault();
-      viewer.actualSize();
+      activeTab?.viewer.actualSize();
       return;
     }
     if (mod && key === "1") {
       e.preventDefault();
-      viewer.fitWidth();
+      activeTab?.viewer.fitWidth();
       return;
     }
     if (mod && key === "2") {
       e.preventDefault();
-      viewer.fitPage();
+      activeTab?.viewer.fitPage();
       return;
     }
     if (mod && key.toLowerCase() === "z") {
       e.preventDefault();
-      if (e.shiftKey) viewer.redo();
-      else viewer.undo();
+      if (e.shiftKey) activeTab?.viewer.redo();
+      else activeTab?.viewer.undo();
       return;
     }
     if (mod && key.toLowerCase() === "y") {
       e.preventDefault();
-      viewer.redo();
+      activeTab?.viewer.redo();
       return;
     }
 
     if (mod || e.altKey) return;
     if (typing) return;
-    if (!currentDoc) return;
+    if (!currentDoc || !activeTab) return;
+    const scroller = activeTab.scroller;
 
     switch (key) {
       case "PageDown":
       case " ":
         e.preventDefault();
-        viewerEl.scrollBy({ top: viewerEl.clientHeight * 0.92, behavior: "smooth" });
+        scroller.scrollBy({ top: scroller.clientHeight * 0.92, behavior: "smooth" });
         break;
       case "PageUp":
         e.preventDefault();
-        viewerEl.scrollBy({ top: -viewerEl.clientHeight * 0.92, behavior: "smooth" });
+        scroller.scrollBy({ top: -scroller.clientHeight * 0.92, behavior: "smooth" });
         break;
       case "ArrowDown":
         e.preventDefault();
-        viewerEl.scrollBy({ top: 88, behavior: "auto" });
+        scroller.scrollBy({ top: 88, behavior: "auto" });
         break;
       case "ArrowUp":
         e.preventDefault();
-        viewerEl.scrollBy({ top: -88, behavior: "auto" });
+        scroller.scrollBy({ top: -88, behavior: "auto" });
         break;
       case "Home":
         e.preventDefault();
@@ -2605,12 +2981,16 @@ function wireFileDrop(): void {
       void installDropped(plugin);
       return;
     }
-    const pdf = list.find((p) => p.toLowerCase().endsWith(".pdf"));
-    if (pdf) void openPath(pdf);
+    const pdfs = list.filter((p) => p.toLowerCase().endsWith(".pdf"));
+    if (pdfs.length) void openMany(pdfs);
     else if (list.length) toast("只能打开 PDF 文件或安装 .pdfplugin 插件", "error");
   });
   window.addEventListener("dragover", (e) => e.preventDefault());
   window.addEventListener("drop", (e) => e.preventDefault());
+}
+
+async function openMany(paths: string[]): Promise<void> {
+  await Promise.all(paths.map(openPath));
 }
 
 window

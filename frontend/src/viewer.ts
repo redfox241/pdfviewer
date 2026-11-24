@@ -140,6 +140,7 @@ export class Viewer {
   private scaleTimer = 0;
   private resizeObserver: ResizeObserver | null = null;
   private pointerDownAt: { x: number; y: number } | null = null;
+  private lastVisibleScrollRatio = 0;
 
   constructor(scroller: HTMLElement, pagesEl: HTMLElement, settings: Settings, events: ViewerEvents) {
     this.scroller = scroller;
@@ -239,7 +240,9 @@ export class Viewer {
     this.applyScaleInternal(desired, reading?.zoom ? "custom" : this.initialMode());
     this.renderVisibleNow();
 
+    this.lastVisibleScrollRatio = reading?.scrollRatio ?? 0;
     requestAnimationFrame(() => {
+      if (gen !== this.loadGen) return;
       this.scrollToPage(this.currentPage, reading?.scrollRatio ?? 0);
       this.events.onReady(this.numPages);
       this.events.onPageChange(this.currentPage);
@@ -417,6 +420,7 @@ export class Viewer {
     this.searchRanges.clear();
     this.rotationDelta = 0;
     this.currentPage = 1;
+    this.lastVisibleScrollRatio = 0;
     this.drag = null;
     this.pagesEl.style.width = "";
     this.scroller.scrollTop = 0;
@@ -755,6 +759,11 @@ export class Viewer {
   };
 
   private onResize(): void {
+    // Inactive tabs are display:none; a zero-sized scrollport must not
+    // overwrite the fit scale. Re-showing the tab fires this again with a
+    // real size.
+    if (!this.numPages) return;
+    if (this.scroller.clientWidth < 2 || this.scroller.clientHeight < 2) return;
     if (this.zoomMode === "fit-width" || this.zoomMode === "fit-page") {
       const anchor = this.anchor();
       window.clearTimeout(this.scaleTimer);
@@ -805,7 +814,10 @@ export class Viewer {
     if (!pv) return 0;
     const rect = pv.el.getBoundingClientRect();
     const host = this.scroller.getBoundingClientRect();
-    return clamp((host.top - rect.top) / Math.max(1, rect.height), 0, 1);
+    if (rect.height > 0 && host.height > 0) {
+      this.lastVisibleScrollRatio = clamp((host.top - rect.top) / rect.height, 0, 1);
+    }
+    return this.lastVisibleScrollRatio;
   }
 
   private onScroll = (): void => {
@@ -1235,29 +1247,49 @@ export class Viewer {
       return null;
     }
     const range = sel.getRangeAt(0);
-    const rects = [...range.getClientRects()];
-    if (!rects.length) {
-      return null;
-    }
+    const byPage = new Map<number, { horizontal: Quad[]; vertical: Quad[]; angled: Quad[] }>();
+    const pageBoxes = new Map<number, DOMRect>();
+    const spanBoxes = new Map<HTMLElement, { box: DOMRect; axis: TextAxis }>();
+    const fragment = document.createRange();
+    for (const node of selectedTextNodes(this.pagesEl, range)) {
+      const span = node.parentElement;
+      const pageEl = span?.closest<HTMLElement>(".page");
+      const num = Number(pageEl?.dataset.page);
+      const pv = this.pageViews.get(num);
+      if (!span?.matches("span:not(.markedContent)") || !pageEl || !pv?.textEl.contains(span)) continue;
+      const start = node === range.startContainer ? range.startOffset : 0;
+      const end = node === range.endContainer ? range.endOffset : node.length;
+      if (start >= end) continue;
+      fragment.setStart(node, start);
+      fragment.setEnd(node, end);
 
-    const byPage = new Map<number, { rects: Quad[]; text: string }>();
-    for (const r of rects) {
-      if (r.width < 1 || r.height < 1) continue;
-      const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-      const pageEl = el?.closest?.(".page") as HTMLElement | null;
-      if (!pageEl) continue;
-      const num = Number(pageEl.dataset.page);
-      if (!num) continue;
-      const pr = pageEl.getBoundingClientRect();
-      const disp = {
-        x: (r.left - pr.left) / Math.max(1, pr.width),
-        y: (r.top - pr.top) / Math.max(1, pr.height),
-        w: r.width / Math.max(1, pr.width),
-        h: r.height / Math.max(1, pr.height),
-      };
-      const entry = byPage.get(num) ?? { rects: [], text: "" };
-      entry.rects.push(disp);
-      byPage.set(num, entry);
+      let pr = pageBoxes.get(num);
+      if (!pr) {
+        pr = pageEl.getBoundingClientRect();
+        pageBoxes.set(num, pr);
+      }
+      if (!pr.width || !pr.height) continue;
+      let metrics = spanBoxes.get(span);
+      if (!metrics) {
+        metrics = { box: span.getBoundingClientRect(), axis: textAxis(span, pv.textRot) };
+        spanBoxes.set(span, metrics);
+      }
+      const { box, axis } = metrics;
+      const entry = byPage.get(num) ?? { horizontal: [], vertical: [], angled: [] };
+      for (const r of fragment.getClientRects()) {
+        const left = axis === "vertical" ? Math.max(r.left, box.left) : r.left;
+        const right = axis === "vertical" ? Math.min(r.right, box.right) : r.right;
+        const top = axis === "horizontal" ? Math.max(r.top, box.top) : r.top;
+        const bottom = axis === "horizontal" ? Math.min(r.bottom, box.bottom) : r.bottom;
+        if (right <= left || bottom <= top) continue;
+        entry[axis].push({
+          x: (left - pr.left) / pr.width,
+          y: (top - pr.top) / pr.height,
+          w: (right - left) / pr.width,
+          h: (bottom - top) / pr.height,
+        });
+        byPage.set(num, entry);
+      }
     }
     if (!byPage.size) {
       return null;
@@ -1267,7 +1299,11 @@ export class Viewer {
     if (!text) return null;
     const groups: SelectionGroup[] = [];
     for (const [page, entry] of byPage) {
-      const merged = mergeQuads(entry.rects);
+      const merged = [
+        ...mergeQuads(entry.horizontal),
+        ...mergeQuads(entry.vertical.map(transposeQuad)).map(transposeQuad),
+        ...entry.angled,
+      ];
       const quads = merged.map((q) => unrotateQuad(q, this.rotationDelta));
       if (!quads.length) continue;
       groups.push({ page, quads, text: groups.length === 0 ? text : "" });
@@ -1853,6 +1889,40 @@ function bboxQuad(a: { x: number; y: number }, b: { x: number; y: number }): Qua
     w: Math.abs(a.x - b.x),
     h: Math.abs(a.y - b.y),
   };
+}
+
+function* selectedTextNodes(pages: HTMLElement, range: Range): IterableIterator<Text> {
+  if (!range.intersectsNode(pages)) return;
+  const ancestor = range.commonAncestorContainer;
+  const root = pages.contains(ancestor) ? ancestor : pages;
+  if (root instanceof Text) {
+    yield root;
+    return;
+  }
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      if (!range.intersectsNode(node)) return NodeFilter.FILTER_REJECT;
+      return node.nodeType === Node.TEXT_NODE ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+    },
+  });
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    yield node as Text;
+  }
+}
+
+type TextAxis = "horizontal" | "vertical" | "angled";
+
+function textAxis(span: HTMLElement, pageRotation: number): TextAxis {
+  const transform = getComputedStyle(span).transform;
+  const matrix = transform === "none" ? null : new DOMMatrixReadOnly(transform);
+  const radians = Math.atan2(matrix?.b ?? 0, matrix?.a ?? 1) + pageRotation * Math.PI / 180;
+  if (Math.abs(Math.sin(radians)) < 0.01) return "horizontal";
+  if (Math.abs(Math.cos(radians)) < 0.01) return "vertical";
+  return "angled";
+}
+
+function transposeQuad(q: Quad): Quad {
+  return { x: q.y, y: q.x, w: q.h, h: q.w };
 }
 
 function mergeQuads(rects: Quad[]): Quad[] {

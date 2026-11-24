@@ -56,7 +56,7 @@
 
 ## 开发
 
-前置：Go 1.23+、Node.js 20+、[Wails CLI](https://wails.io/docs/gettingstarted/installation)。
+前置：Go 1.26.0+、Node.js 20.19+（20.x）或 22.12+、[Wails CLI](https://wails.io/docs/gettingstarted/installation)。
 
 ```bash
 # 安装 Wails CLI（国内网络可用 GOPROXY=https://goproxy.cn,direct）
@@ -129,7 +129,7 @@ wails build -platform windows/amd64 -nsis
 3. 顶部标注工具栏可切换选择、高亮、下划线、删除线、记号笔、涂改带、区域框选、便签、橡皮擦。
 4. 页面停留 3 秒自动标记已读（可在设置中关闭）；`R` 手动切换本页已读。
 5. `⌘/Ctrl + F` 搜索，`Enter` / `Shift + Enter` 在结果间跳转。
-6. `⌘/Ctrl + P` 打印：选择范围与是否包含标注后，macOS 会打开「预览」的打印对话框；Windows 用系统默认阅读器打开，按 `Ctrl+P` 打印。同一面板可用「导出 PDF…」生成带标注的副本。
+6. `⌘/Ctrl + P` 打印：选择范围与是否包含标注后，macOS 会打开「预览」的打印对话框；Windows 用系统默认阅读器打开，按 `Ctrl+P` 打印（关联缺失或损坏时自动改用系统自带的 Edge）。同一面板可用「导出 PDF…」生成带标注的副本。
 
 ### 快捷键
 

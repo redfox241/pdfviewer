@@ -27,6 +27,8 @@ async function call<T>(method: string, ...args: unknown[]): Promise<T> {
 
 export const api = {
   ping: () => call<string>("Ping"),
+  enableSaveOnQuit: () => call<void>("EnableSaveOnQuit"),
+  quitAfterSave: () => call<void>("QuitAfterSave"),
   logError: (message: string) => call<void>("LogError", message),
   openDialog: () => call<DocInfo>("OpenDialog"),
   openDocument: (path: string) => call<DocInfo>("OpenDocument", path),

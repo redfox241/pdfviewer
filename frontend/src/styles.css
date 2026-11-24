@@ -200,28 +200,128 @@ body[data-platform="darwin"] .topbar {
   height: 17px;
 }
 
-.doc-title {
+.doc-tabs {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  height: 36px;
+  padding: 0 6px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+}
+
+.doc-tab-list {
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.doc-tab-list::-webkit-scrollbar {
+  display: none;
+}
+
+.doc-tab {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
-  min-width: 0;
-  max-width: 30vw;
+  flex: none;
+  max-width: 230px;
+  min-width: 108px;
+  margin: 5px 0 0;
+  padding: 0 6px 0 10px;
+  border-radius: 8px 8px 0 0;
   color: var(--ink-2);
   font-size: 12.5px;
   font-weight: 550;
-  padding: 0 4px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  transition: background 120ms var(--ease), color 120ms var(--ease);
 }
 
-.doc-title .doc-icon {
-  width: 15px;
-  height: 15px;
+.doc-tab:hover {
+  background: color-mix(in srgb, var(--bg-elev) 62%, transparent);
+  color: var(--ink);
+}
+
+.doc-tab.active {
+  background: var(--bg);
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+.doc-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: var(--bg);
+}
+
+.doc-tab .icon {
+  width: 14px;
+  height: 14px;
   color: var(--muted);
 }
 
-.doc-title span {
+.doc-tab.active .icon {
+  color: var(--accent);
+}
+
+.doc-tab-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.doc-tab-close {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  margin-left: auto;
+  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.doc-tab-close .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.doc-tab-close:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.tab-new {
+  width: 28px;
+  flex: none;
+  margin: 5px 0;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.tab-new:hover {
+  background: var(--bg-elev);
+  color: var(--ink);
+}
+
+.tab-new .icon {
+  width: 16px;
+  height: 16px;
 }
 
 .seg {
@@ -352,6 +452,21 @@ body[data-platform="darwin"] .topbar {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
+  display: flex;
+}
+
+.viewer-host {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.tab-viewer {
+  display: none;
+}
+
+.tab-viewer.active {
   display: flex;
 }
 
@@ -749,6 +864,18 @@ body[data-platform="darwin"] .topbar {
   user-select: text;
 }
 
+/*
+ * The browser sizes native ::selection from the fallback font's ascent and
+ * descent (~1.4em), not from our 1em-tall PDF line box. With tight PDF
+ * leading, highlights from adjacent lines therefore overlap and the
+ * translucent selection colour doubles up into a darker band. Clipping each
+ * span to its own line box keeps the selection inside the PDF line without
+ * changing its hit area.
+ */
+.textLayer span {
+  clip-path: inset(0);
+}
+
 .textLayer > :not(.markedContent),
 .textLayer .markedContent span:not(.markedContent) {
   z-index: 1;
@@ -1059,6 +1186,104 @@ body[data-platform="darwin"] .tool-palette {
   padding-left: 84px;
 }
 
+.palette-grip {
+  width: 20px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--muted);
+  cursor: grab;
+  touch-action: none;
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.palette-grip:hover {
+  background: var(--bg-sunken);
+  color: var(--ink-2);
+}
+
+.palette-grip:active {
+  cursor: grabbing;
+}
+
+.palette-grip .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.tool-palette.dragging {
+  opacity: 0.6;
+}
+
+body.dock-dragging {
+  cursor: grabbing;
+}
+
+body.dock-dragging * {
+  cursor: grabbing !important;
+}
+
+/* Tool strip docked as a vertical rail on either side of the page. */
+#app[data-tool-dock="left"] .workspace > .tool-palette,
+#app[data-tool-dock="right"] .workspace > .tool-palette {
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  width: 46px;
+  height: auto;
+  min-height: 0;
+  padding: 8px 0;
+  gap: 3px;
+  border-bottom: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+#app[data-tool-dock="left"] .workspace > .tool-palette {
+  border-right: 1px solid var(--line);
+}
+
+#app[data-tool-dock="right"] .workspace > .tool-palette {
+  border-left: 1px solid var(--line);
+}
+
+#app[data-tool-dock="left"] .workspace > .tool-palette::-webkit-scrollbar,
+#app[data-tool-dock="right"] .workspace > .tool-palette::-webkit-scrollbar {
+  display: none;
+}
+
+#app[data-tool-dock="left"] .palette-grip,
+#app[data-tool-dock="right"] .palette-grip {
+  width: 30px;
+  height: 22px;
+}
+
+#app[data-tool-dock="left"] .palette-divider,
+#app[data-tool-dock="right"] .palette-divider {
+  width: 18px;
+  height: 1px;
+  margin: 5px 0;
+}
+
+#app[data-tool-dock="left"] .palette-colors,
+#app[data-tool-dock="right"] .palette-colors {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  width: 40px;
+  padding: 2px 0;
+  gap: 5px;
+}
+
+#app[data-tool-dock="left"] .swatch,
+#app[data-tool-dock="right"] .swatch {
+  width: 16px;
+  height: 16px;
+}
+
 .tool-btn {
   position: relative;
   width: 30px;
@@ -1123,6 +1348,71 @@ body[data-platform="darwin"] .tool-palette {
   box-shadow:
     0 0 0 2px var(--bg-elev),
     0 0 0 3.5px var(--accent);
+}
+
+/* Drop targets shown while the tool strip is being dragged. */
+.dock-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  pointer-events: none;
+}
+
+.dock-zone {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  border: 2px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  opacity: 0.32;
+  transition: opacity 120ms var(--ease), background 120ms var(--ease);
+}
+
+.dock-zone.active {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.dock-zone[data-dock="top"] {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 84px;
+  border-top: 0;
+  border-left: 0;
+  border-right: 0;
+}
+
+.dock-zone[data-dock="left"] {
+  top: 84px;
+  bottom: 0;
+  left: 0;
+  width: 84px;
+  border-top: 0;
+  border-bottom: 0;
+  border-left: 0;
+}
+
+.dock-zone[data-dock="right"] {
+  top: 84px;
+  right: 0;
+  bottom: 0;
+  width: 84px;
+  border-top: 0;
+  border-bottom: 0;
+  border-right: 0;
+}
+
+.dock-zone span {
+  writing-mode: vertical-rl;
+}
+
+.dock-zone[data-dock="top"] span {
+  writing-mode: horizontal-tb;
 }
 
 @keyframes pop-in {
@@ -1610,8 +1900,8 @@ body[data-platform="darwin"] .tool-palette {
 }
 
 @media (max-width: 1040px) {
-  .doc-title {
-    display: none;
+  .doc-tab {
+    max-width: 170px;
   }
 }
 

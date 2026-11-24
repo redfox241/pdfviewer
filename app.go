@@ -13,6 +13,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -47,9 +48,33 @@ type App struct {
 	pluginErr   string
 	printErr    string
 	printLimit  int64
+	saveOnQuit  atomic.Bool
+	quitSaved   atomic.Bool
 
 	trMu      sync.Mutex
 	trCancels map[string]context.CancelFunc
+}
+
+// EnableSaveOnQuit is called after the WebView registers the event listener.
+func (a *App) EnableSaveOnQuit() {
+	a.saveOnQuit.Store(true)
+}
+
+func (a *App) beforeClose(ctx context.Context) bool {
+	if !a.saveOnQuit.Load() || a.quitSaved.Load() {
+		return false
+	}
+	wruntime.EventsEmit(ctx, "pdfviewer:save-before-quit")
+	return true
+}
+
+// QuitAfterSave lets the intercepted close proceed only after the WebView
+// has finished writing the open documents.
+func (a *App) QuitAfterSave() {
+	if a.ctx != nil {
+		a.quitSaved.Store(true)
+		wruntime.Quit(a.ctx)
+	}
 }
 
 type docEntry struct {
@@ -841,6 +866,16 @@ func (a *App) PrintStagedPDF(id string) (PrintOutcome, error) {
 		} else {
 			a.logf("windows print handoff failed: %v", err)
 		}
+		// Windows 10/11 always ships Edge; use it when the .pdf association
+		// is missing or broken. Edge's built-in viewer prints with Ctrl+P.
+		if err := openWithEdge(job.Path); err == nil {
+			return PrintOutcome{
+				Mode:    "viewer",
+				Message: "已用 Microsoft Edge 打开，请按 Ctrl+P 打印。",
+			}, nil
+		} else {
+			a.logf("edge print handoff failed: %v", err)
+		}
 	default:
 		if err := exec.Command("xdg-open", job.Path).Run(); err == nil {
 			return PrintOutcome{Mode: "viewer", Message: "已用系统默认阅读器打开，请打印。"}, nil
@@ -980,4 +1015,35 @@ func printDefaultName(name string, includeAnnotations bool) string {
 		suffix = "标注"
 	}
 	return base + " (" + suffix + ").pdf"
+}
+
+// openWithEdge launches PDFs in the browser that ships with Windows 10/11,
+// even when the .pdf file association is absent. The user prints from Edge's
+// built-in PDF viewer with Ctrl+P.
+func openWithEdge(path string) error {
+	for _, candidate := range edgeExecutables() {
+		if strings.ContainsRune(candidate, os.PathSeparator) {
+			info, err := os.Stat(candidate)
+			if err != nil || info.IsDir() {
+				continue
+			}
+		}
+		if err := exec.Command(candidate, path).Start(); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("未找到 Microsoft Edge")
+}
+
+func edgeExecutables() []string {
+	var out []string
+	for _, env := range []string{"ProgramFiles(x86)", "ProgramFiles", "ProgramW6432", "LOCALAPPDATA"} {
+		root := os.Getenv(env)
+		if root == "" {
+			continue
+		}
+		out = append(out, filepath.Join(root, "Microsoft", "Edge", "Application", "msedge.exe"))
+	}
+	out = append(out, "msedge.exe")
+	return out
 }

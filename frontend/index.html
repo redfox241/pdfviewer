@@ -18,6 +18,14 @@
       <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6" /></symbol>
       <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" /></symbol>
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></symbol>
+      <symbol id="i-grip" viewBox="0 0 24 24">
+        <circle cx="9" cy="6" r="1.4" fill="currentColor" stroke="none" />
+        <circle cx="15" cy="6" r="1.4" fill="currentColor" stroke="none" />
+        <circle cx="9" cy="12" r="1.4" fill="currentColor" stroke="none" />
+        <circle cx="15" cy="12" r="1.4" fill="currentColor" stroke="none" />
+        <circle cx="9" cy="18" r="1.4" fill="currentColor" stroke="none" />
+        <circle cx="15" cy="18" r="1.4" fill="currentColor" stroke="none" />
+      </symbol>
       <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" /></symbol>
       <symbol id="i-search" viewBox="0 0 24 24">
         <circle cx="10.5" cy="10.5" r="6.5" />
@@ -108,17 +116,13 @@
       </symbol>
     </svg>
 
-    <div id="app">
+    <div id="app" data-tool-dock="top">
       <header id="topbar" class="topbar">
         <div class="topbar-left">
           <button id="btn-open" class="tbtn" title="打开 PDF (⌘O)">
             <svg class="icon"><use href="#i-folder" /></svg>
             <span>打开</span>
           </button>
-          <div id="doc-title" class="doc-title" title="">
-            <svg class="icon doc-icon"><use href="#i-file" /></svg>
-            <span id="doc-name">未打开文档</span>
-          </div>
         </div>
 
         <div class="topbar-center">
@@ -174,7 +178,23 @@
         </div>
       </header>
 
+      <nav id="doc-tabs" class="doc-tabs" aria-label="打开的文档">
+        <div id="doc-tab-list" class="doc-tab-list" role="tablist"></div>
+        <button id="btn-tab-new" class="tab-new" title="打开 PDF (⌘O)">
+          <svg class="icon"><use href="#i-plus" /></svg>
+        </button>
+      </nav>
+
       <div id="tool-palette" class="tool-palette hidden">
+        <button
+          id="palette-grip"
+          class="palette-grip"
+          type="button"
+          title="拖动工具栏：顶部 / 左侧 / 右侧（双击循环）"
+          aria-label="拖动工具栏"
+        >
+          <svg class="icon"><use href="#i-grip" /></svg>
+        </button>
         <button class="tool-btn" data-tool="select" title="选择 (V)">
           <svg class="icon"><use href="#i-cursor" /></svg>
         </button>
@@ -224,9 +244,7 @@
         </aside>
 
         <div class="viewer-shell">
-          <main id="viewer" class="viewer" data-tool="select">
-            <div id="pages" class="pages"></div>
-          </main>
+          <div id="viewer-host" class="viewer-host"></div>
 
           <div id="empty" class="empty">
             <div class="empty-card">
@@ -268,6 +286,12 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <div id="dock-overlay" class="dock-overlay hidden" aria-hidden="true">
+      <div class="dock-zone" data-dock="top"><span>顶部</span></div>
+      <div class="dock-zone" data-dock="left"><span>左侧</span></div>
+      <div class="dock-zone" data-dock="right"><span>右侧</span></div>
     </div>
 
     <div id="toast-host" class="toast-host"></div>
