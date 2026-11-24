@@ -71,10 +71,13 @@ export PATH="$HOME/go/bin:$PATH"
 根目录提供 `Makefile` 和 `scripts/build.sh`，会自动查找 `wails`（PATH 或 `$(go env GOPATH)/bin`）。
 
 ```bash
-make mac                 # macOS 通用包（Intel + Apple Silicon）
+make mac                 # macOS 分架构包：arm64 + amd64（各一个 zip）
+make mac-arm64           # 只构建 Apple Silicon
+make mac-amd64           # 只构建 Intel
+make mac-universal       # macOS 通用包（单文件，体积约为两份之和）
 make win                 # Windows x64 exe（可在 macOS 上交叉编译）
 make win-installer       # Windows x64 NSIS 安装包（需要 makensis）
-make all                 # macOS 通用包 + Windows x64
+make all                 # macOS arm64 + amd64 + Windows x64
 
 make dev                 # 热重载开发
 make test                # go test ./...
@@ -93,6 +96,31 @@ make mac CLEAN=1         # 构建前执行 wails build -clean
 ./scripts/build.sh win --clean
 ```
 
+发布包输出到 `build/bin/artifacts/`，按版本与架构命名：
+
+```
+pdfviewer-<版本>-macos-arm64.zip
+pdfviewer-<版本>-macos-amd64.zip
+pdfviewer-<版本>-windows-x64.exe
+```
+
+`build/bin/pdfviewer.app` 与 `build/bin/PDF Viewer.exe` 仍然保留，方便本地运行。
+通用的 `pdfviewer.app` 约 63 MB（arm64 + x86_64 两份），单架构 zip 约 31 MB。
+
+### 发布
+
+`make release` 会构建分架构包、推送标签并上传到 GitHub Releases：
+
+```bash
+GITHUB_TOKEN=ghp_xxx make release TAG=v1.0.4
+# 或
+GITHUB_TOKEN=ghp_xxx ./scripts/release.sh v1.0.4 --notes docs/release-notes.md
+```
+
+令牌需要目标仓库的 `Contents: Read and write` 权限。加 `--skip-build` 可复用
+`build/bin/artifacts/` 中已经生成、且版本号与 `TAG` 一致的包。
+发布完成后，release 里会分别提供 macOS arm64、macOS amd64 和 Windows x64 三个下载文件。
+
 ### 一键构建（Windows PowerShell）
 
 ```powershell
@@ -109,11 +137,14 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 win
 > macOS 包只能在 macOS 上构建；Windows 包可以在 macOS / Linux / Windows 上构建。
 > Windows 安装包需要 NSIS（`makensis`），参见 [Wails Windows Installer](https://wails.io/docs/guides/windows-installer/)。
 
-产物位于 `build/bin/`：macOS 为 `pdfviewer.app`，Windows 为 `PDF Viewer.exe`。
+产物位于 `build/bin/`：macOS 为 `pdfviewer.app`，Windows 为 `PDF Viewer.exe`；分架构发布包
+（含版本号的 zip/exe）位于 `build/bin/artifacts/`。
 
 如果不想用脚本，也可以直接调用 Wails CLI：
 
 ```bash
+wails build -platform darwin/arm64
+wails build -platform darwin/amd64
 wails build -platform darwin/universal
 wails build -platform windows/amd64
 wails build -platform windows/amd64 -nsis

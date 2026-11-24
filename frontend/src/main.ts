@@ -111,6 +111,7 @@ let opening = false;
 let quitting = false;
 const openQueue = new SerialQueue();
 let platform = "web";
+let appVersion = "dev";
 let zoomBadgeTimer = 0;
 let plugins: PluginInfo[] = [];
 
@@ -119,6 +120,7 @@ let plugins: PluginInfo[] = [];
 async function boot(): Promise<void> {
   void api.ping().catch(() => undefined);
   platform = await api.platform().catch(() => "web");
+  appVersion = await api.version().catch(() => "dev");
   document.body.dataset.platform = platform;
   settings = await api.settings().catch(() => ({
     theme: "system",
@@ -2487,7 +2489,7 @@ function openSettings(focusPlugins = false): void {
       <div class="plugin-list" id="plugin-list"></div>
       <div class="plugin-editor hidden" id="plugin-editor"></div>
     </div>
-    <div class="field meta-line">PDF Viewer ${"0.2.0"} · Go + Wails + pdf.js</div>
+    <div class="field meta-line">PDF Viewer ${appVersion} · Go + Wails + pdf.js</div>
   `;
 
   const themeSel = body.querySelector<HTMLSelectElement>('[data-k="theme"]')!;

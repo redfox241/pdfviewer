@@ -11,22 +11,24 @@ usage() {
 用法: scripts/build.sh <target> [--clean]
 
 target:
-  mac             macOS 通用包 (Intel + Apple Silicon)
-  mac-amd64       macOS Intel
+  mac             macOS 分架构包：arm64 + amd64，各生成一个 zip
   mac-arm64       macOS Apple Silicon
+  mac-amd64       macOS Intel
+  mac-universal   macOS 通用包 (Intel + Apple Silicon)
   win             Windows x64 exe
   win-arm64       Windows ARM64 exe
   win-installer   Windows x64 NSIS 安装包（需要 makensis）
-  all             macOS 通用包 + Windows x64（需要 macOS 主机）
+  all             macOS arm64 + amd64 + Windows x64（需要 macOS 主机）
   dev             wails dev
   test            go test ./...
   doctor          wails doctor
-  clean           删除 build/bin 和 frontend/dist
+  clean           删除 build/bin、build/bin/artifacts 和 frontend/dist
   help            显示本帮助
 
+发布包输出到 build/bin/artifacts/，命名带版本与架构。
 选项:
   --clean         传给 wails build 的 -clean，构建前清理输出目录
-  也可使用环境变量 CLEAN=1、WAILS=/path/to/wails
+  也可使用环境变量 CLEAN=1、WAILS=/path/to/wails、VERSION=x.y.z
 EOF
 }
 
@@ -95,9 +97,54 @@ ensure_mac_host() {
   fi
 }
 
+ARTIFACTS="$ROOT/build/bin/artifacts"
+
+version() {
+  if [[ -n "${VERSION:-}" ]]; then
+    printf '%s' "$VERSION"
+    return 0
+  fi
+  if command -v node >/dev/null 2>&1; then
+    node -e 'process.stdout.write(require("./wails.json").info.productVersion)' 2>/dev/null && return 0
+  fi
+  printf '0.0.0'
+}
+
+package_mac() {
+  local arch="$1"
+  local ver
+  ver="$(version)"
+  local app="$ROOT/build/bin/pdfviewer.app"
+  [[ -d "$app" ]] || die "未找到 $app"
+  mkdir -p "$ARTIFACTS"
+  local out="$ARTIFACTS/pdfviewer-${ver}-macos-${arch}.zip"
+  rm -f "$out"
+  # ditto preserves the bundle layout, symlinks and extended attributes.
+  ditto -c -k --sequesterRsrc --keepParent "$app" "$out"
+  printf '发布包: %s (%s)\n' "$out" "$(du -h "$out" | cut -f1)"
+}
+
+package_win() {
+  local arch="$1"
+  local ver
+  ver="$(version)"
+  local exe="$ROOT/build/bin/PDF Viewer.exe"
+  [[ -f "$exe" ]] || die "未找到 $exe"
+  mkdir -p "$ARTIFACTS"
+  local out="$ARTIFACTS/pdfviewer-${ver}-windows-${arch}.exe"
+  cp "$exe" "$out"
+  printf '发布包: %s (%s)\n' "$out" "$(du -h "$out" | cut -f1)"
+}
+
+build_mac_arch() {
+  local arch="$1"
+  build "$2" "darwin/$arch"
+  package_mac "$arch"
+}
+
 clean_artifacts() {
   rm -rf build/bin frontend/dist
-  printf '已清理 build/bin 和 frontend/dist\n'
+  printf '已清理 build/bin（含 artifacts）和 frontend/dist\n'
 }
 
 target="${1:-}"
@@ -133,21 +180,29 @@ case "$target" in
     ;;
   mac|macos)
     ensure_mac_host
-    build "$clean" darwin/universal
-    ;;
-  mac-amd64)
-    ensure_mac_host
-    build "$clean" darwin/amd64
+    build_mac_arch arm64 "$clean"
+    build_mac_arch amd64 0
     ;;
   mac-arm64)
     ensure_mac_host
-    build "$clean" darwin/arm64
+    build_mac_arch arm64 "$clean"
+    ;;
+  mac-amd64)
+    ensure_mac_host
+    build_mac_arch amd64 "$clean"
+    ;;
+  mac-universal)
+    ensure_mac_host
+    build "$clean" darwin/universal
+    package_mac universal
     ;;
   win|windows)
     build "$clean" windows/amd64
+    package_win x64
     ;;
   win-arm64)
     build "$clean" windows/arm64
+    package_win arm64
     ;;
   win-installer)
     if ! command -v makensis >/dev/null 2>&1; then
@@ -157,9 +212,11 @@ case "$target" in
     ;;
   all)
     ensure_mac_host
-    # 只在第一次构建时清理，避免第二次构建删掉刚生成的 macOS 包。
-    build "$clean" darwin/universal
+    # 只在第一次构建时清理，避免后续构建删掉刚生成的包。
+    build_mac_arch arm64 "$clean"
+    build_mac_arch amd64 0
     build 0 windows/amd64
+    package_win x64
     ;;
   *)
     printf '未知目标: %s\n\n' "$target" >&2

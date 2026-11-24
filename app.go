@@ -27,7 +27,7 @@ import (
 	"pdfviewer/internal/settings"
 )
 
-const appVersion = "0.2.0"
+const appVersion = "1.1.0"
 
 type App struct {
 	ctx      context.Context
