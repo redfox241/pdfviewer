@@ -118,7 +118,8 @@ GITHUB_TOKEN=ghp_xxx ./scripts/release.sh v1.0.4 --notes docs/release-notes.md
 ```
 
 令牌需要目标仓库的 `Contents: Read and write` 权限。加 `--skip-build` 可复用
-`build/bin/artifacts/` 中已经生成、且版本号与 `TAG` 一致的包。
+`build/bin/artifacts/` 中已经生成、且版本号与 `TAG` 一致的包；先用 `--dry-run`
+可以只检查将上传哪些文件，不创建标签或 release。
 发布完成后，release 里会分别提供 macOS arm64、macOS amd64 和 Windows x64 三个下载文件。
 
 ### 一键构建（Windows PowerShell）

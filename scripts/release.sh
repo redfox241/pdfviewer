@@ -18,28 +18,32 @@ die() {
 
 usage() {
   cat <<'EOF'
-用法: scripts/release.sh <tag> [--skip-build] [--notes <file>]
+用法: scripts/release.sh <tag> [--skip-build] [--dry-run] [--notes <file>]
 
-  <tag>            发布标签，例如 v1.0.4
+  <tag>            发布标签，例如 v1.1.0
   --skip-build     直接使用 build/bin/artifacts 中已有的包
-  --notes <file>   发布说明文件（默认 README 摘要）
+  --dry-run        只检查并列出将上传的文件，不创建标签或 release
+  --notes <file>   发布说明文件（默认自动生成）
 
 环境变量:
-  GITHUB_TOKEN / GH_TOKEN   GitHub 令牌（必需）
+  GITHUB_TOKEN / GH_TOKEN   GitHub 令牌（dry-run 之外必需）
   VERSION                   覆盖发布包文件名中的版本（默认取 tag）
 
 示例:
-  GITHUB_TOKEN=ghp_xxx ./scripts/release.sh v1.0.4
+  GITHUB_TOKEN=ghp_xxx ./scripts/release.sh v1.1.0
+  ./scripts/release.sh v1.1.0 --skip-build --dry-run
 EOF
 }
 
 tag=""
 skip_build=0
+dry_run=0
 notes_file=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-build) skip_build=1 ;;
+    --dry-run) dry_run=1 ;;
     --notes)
       [[ $# -ge 2 ]] || die "--notes 缺少文件参数"
       notes_file="$2"
@@ -69,7 +73,9 @@ ver="${VERSION:-${tag#v}}"
 export VERSION="$ver"
 
 token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-[[ -n "$token" ]] || die "缺少 GITHUB_TOKEN。请创建一个带 Contents: Read and write 权限的令牌后重试。"
+if [[ -z "$token" && "$dry_run" == "0" ]]; then
+  die "缺少 GITHUB_TOKEN。请创建一个带 Contents: Read and write 权限的令牌后重试。"
+fi
 
 slug="$(git remote get-url origin 2>/dev/null | sed -E 's#(git@|https://)github\.com[:/]##; s#\.git$##')"
 [[ "$slug" == */* ]] || die "无法从 origin 解析 GitHub 仓库：$slug"
@@ -101,7 +107,26 @@ if [[ -n "$(git status --porcelain -- . ':!build' ':!frontend/dist')" ]]; then
   printf '提示: 工作区有未提交的改动，发布包会包含这些内容。\n' >&2
 fi
 
-if ! git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+tag_exists=0
+if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+  tag_exists=1
+fi
+
+if [[ "$dry_run" == "1" ]]; then
+  if [[ "$tag_exists" == "1" ]]; then
+    printf 'dry-run: 标签 %s 已存在\n' "$tag"
+  else
+    printf 'dry-run: 将创建标签 %s\n' "$tag"
+  fi
+  printf 'dry-run: 仓库 %s，release %s\n' "$slug" "$tag"
+  for file in "$mac_arm" "$mac_intel" "$win_x64"; do
+    printf '  %s (%s)\n' "$(basename "$file")" "$(du -h "$file" | cut -f1)"
+  done
+  printf 'dry-run: 未创建标签、未上传。\n'
+  exit 0
+fi
+
+if [[ "$tag_exists" == "0" ]]; then
   git tag -a "$tag" -m "PDF Viewer $tag"
 fi
 if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
