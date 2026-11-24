@@ -21,6 +21,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
 
 const NS = "http://www.w3.org/2000/svg";
 const SIDE_PAD = 32;
+const SPREAD_GAP = 18;
 const MIN_SCALE = 1 / 3; // 25% of 96 dpi
 const MAX_SCALE = 20 / 3; // 500% of 96 dpi
 
@@ -101,6 +102,7 @@ export class Viewer {
 
   private scale = 1;
   private zoomMode: ZoomMode = "fit-width";
+  private twoPageView = false;
   private rotationDelta = 0;
   private currentPage = 1;
   private annotations: Annotation[] = [];
@@ -137,6 +139,7 @@ export class Viewer {
   private readTimer = 0;
   private readTimerPage = 0;
   private scrollRaf = 0;
+  private navigationTop: number | null = null;
   private scaleTimer = 0;
   private resizeObserver: ResizeObserver | null = null;
   private pointerDownAt: { x: number; y: number } | null = null;
@@ -147,6 +150,7 @@ export class Viewer {
     this.pagesEl = pagesEl;
     this.settings = settings;
     this.events = events;
+    this.pagesEl.style.setProperty("--spread-gap", `${SPREAD_GAP}px`);
 
     this.pagesEl.addEventListener("pointerdown", this.onPointerDown);
     this.pagesEl.addEventListener("pointermove", this.onPointerMove);
@@ -243,7 +247,7 @@ export class Viewer {
     this.lastVisibleScrollRatio = reading?.scrollRatio ?? 0;
     requestAnimationFrame(() => {
       if (gen !== this.loadGen) return;
-      this.scrollToPage(this.currentPage, reading?.scrollRatio ?? 0);
+      this.scrollToPage(this.currentPage, reading?.scrollRatio ?? 0, true);
       this.events.onReady(this.numPages);
       this.events.onPageChange(this.currentPage);
       this.events.onReadChange();
@@ -297,7 +301,6 @@ export class Viewer {
       badge.textContent = "✓";
 
       el.append(canvas, textEl, svg, badge);
-      this.pagesEl.append(el);
 
       const pv: PageView = {
         num: n,
@@ -318,22 +321,49 @@ export class Viewer {
       this.applyPageBox(pv);
       this.updateBadge(pv);
     }
-    this.applyPagesWidth();
+    this.arrangePageRows();
+  }
+
+  private get pagesPerRow(): number {
+    return this.twoPageView ? 2 : 1;
+  }
+
+  private arrangePageRows(): void {
+    const rows = document.createDocumentFragment();
+    let row: HTMLElement | null = null;
+    for (const pv of this.pageViews.values()) {
+      if (!row || (pv.num - 1) % this.pagesPerRow === 0) {
+        row = document.createElement("div");
+        row.className = "page-row";
+        rows.append(row);
+      }
+      row.append(pv.el);
+    }
+    this.pagesEl.replaceChildren(rows);
+  }
+
+  private *rowSizes(): Generator<{ w: number; h: number; gap: number }> {
+    const swap = normRot(this.rotationDelta) % 180 !== 0;
+    const step = this.pagesPerRow;
+    for (let i = 0; i < this.metas.length; i += step) {
+      let w = 0;
+      let h = 0;
+      const count = Math.min(step, this.metas.length - i);
+      for (let j = 0; j < count; j++) {
+        const m = this.metas[i + j]!;
+        w += swap ? m.baseH : m.baseW;
+        h = Math.max(h, swap ? m.baseW : m.baseH);
+      }
+      yield { w, h, gap: count > 1 ? SPREAD_GAP : 0 };
+    }
   }
 
   private applyPagesWidth(): void {
-    // Fit modes must never size the column from a stale page width: keep it at
-    // exactly the scrollport width so it stays centred when the window grows
-    // (e.g. after a title-bar double-click maximise). Only custom zooms need an
-    // explicit width so that horizontal scrolling has a real extent.
-    if (this.zoomMode === "fit-width" || this.zoomMode === "fit-page") {
-      this.pagesEl.style.width = "100%";
-      return;
-    }
+    // CSS keeps the content at least as wide as the scrollport; this width
+    // leaves enough room to pan when a row exceeds it.
     let maxW = 0;
-    for (const pv of this.pageViews.values()) {
-      const s = this.displaySize(pv.meta);
-      maxW = Math.max(maxW, s.w);
+    for (const row of this.rowSizes()) {
+      maxW = Math.max(maxW, row.w * this.scale + row.gap);
     }
     this.pagesEl.style.width = `${Math.ceil(maxW + SIDE_PAD * 2)}px`;
   }
@@ -358,24 +388,13 @@ export class Viewer {
 
   private computeFit(mode: "fit-width" | "fit-page"): number {
     if (!this.metas.length) return 1;
-    // Pages in real-world scans often have slightly different CropBoxes, so
-    // fit against the largest page. Using the current page can leave the pages
-    // container a few pixels wider than the viewport, which shows up as a
-    // horizontal scrollbar and off-centre content after resizing/maximising.
-    const swap = normRot(this.rotationDelta) % 180 !== 0;
-    let maxW = 1;
-    let maxH = 1;
-    for (const m of this.metas) {
-      const w = swap ? m.baseH : m.baseW;
-      const h = swap ? m.baseW : m.baseH;
-      if (w > maxW) maxW = w;
-      if (h > maxH) maxH = h;
-    }
     const availW = Math.max(200, this.scroller.clientWidth - SIDE_PAD * 2);
     const availH = Math.max(200, this.scroller.clientHeight - 40);
-    let s = availW / maxW;
-    if (mode === "fit-page") {
-      s = Math.min(s, availH / maxH);
+    // Keep one zoom level for all rows, including mixed page sizes.
+    let s = MAX_SCALE;
+    for (const row of this.rowSizes()) {
+      s = Math.min(s, (availW - row.gap) / row.w);
+      if (mode === "fit-page") s = Math.min(s, availH / row.h);
     }
     return clamp(s, MIN_SCALE, MAX_SCALE);
   }
@@ -420,6 +439,7 @@ export class Viewer {
     this.searchRanges.clear();
     this.rotationDelta = 0;
     this.currentPage = 1;
+    this.navigationTop = null;
     this.lastVisibleScrollRatio = 0;
     this.drag = null;
     this.pagesEl.style.width = "";
@@ -508,24 +528,26 @@ export class Viewer {
   private async renderPage(n: number): Promise<void> {
     const pv = this.pageViews.get(n);
     if (!pv || !this.pdf) return;
-    const target = Math.min(this.scale, 3);
-    if (Math.abs(pv.renderedScale - target) < 0.001 && pv.page) {
+    if (Math.abs(pv.renderedScale - Math.min(this.scale, 3)) < 0.001 && pv.page) {
       this.renderAnnotations(n);
       return;
     }
 
     pv.renderTask?.cancel?.();
     const page: PdfPage = await this.pdf.getPage(n);
-    if (!this.pageViews.has(n)) return;
+    if (this.pageViews.get(n) !== pv) return;
 
     // Correct our size heuristic for very large documents.
     const vp1 = page.getViewport({ scale: 1 });
     if (Math.abs(vp1.width - pv.meta.baseW) > 0.5 || Math.abs(vp1.height - pv.meta.baseH) > 0.5) {
-      pv.meta = { baseW: vp1.width, baseH: vp1.height, intrinsicRot: page.rotate };
+      const anchor = this.anchor();
+      this.metas[n - 1] = pv.meta = { baseW: vp1.width, baseH: vp1.height, intrinsicRot: page.rotate };
       pv.renderedScale = 0;
-      this.applyLayout();
+      this.updateFitLayout();
+      this.scrollToPage(anchor.page, anchor.ratio);
     }
 
+    const target = Math.min(this.scale, 3);
     const totalRot = normRot(pv.meta.intrinsicRot + this.rotationDelta);
     const renderScale = this.renderScale();
     const vp = page.getViewport({ scale: renderScale, rotation: totalRot });
@@ -731,6 +753,34 @@ export class Viewer {
     return this.zoomMode;
   }
 
+  isTwoPageView(): boolean {
+    return this.twoPageView;
+  }
+
+  setTwoPageView(enabled: boolean): void {
+    if (enabled === this.twoPageView) return;
+    const anchor = this.anchor();
+    this.twoPageView = enabled;
+    this.arrangePageRows();
+    this.updateFitLayout();
+    this.scrollToPage(anchor.page, anchor.ratio, true);
+    this.scheduleRender();
+  }
+
+  private updateFitLayout(): void {
+    if (
+      (this.zoomMode === "fit-width" || this.zoomMode === "fit-page") &&
+      this.scroller.clientWidth >= 2 && this.scroller.clientHeight >= 2
+    ) {
+      const scale = this.computeFit(this.zoomMode);
+      if (Math.abs(scale - this.scale) > 0.0001) {
+        this.applyScaleInternal(scale, this.zoomMode);
+        return;
+      }
+    }
+    this.applyLayout();
+  }
+
   rotate(delta: number): void {
     const anchor = this.anchor();
     this.rotationDelta = normRot(this.rotationDelta + delta);
@@ -738,7 +788,7 @@ export class Viewer {
       pv.renderedScale = 0;
       pv.textRot = -1;
     }
-    this.applyLayout();
+    this.updateFitLayout();
     this.restoreAnchor(anchor);
     this.scheduleRender();
   }
@@ -780,7 +830,7 @@ export class Viewer {
 
   goToPage(n: number): void {
     const page = clamp(Math.round(n), 1, this.numPages);
-    this.scrollToPage(page, 0);
+    this.scrollToPage(page, 0, true);
     this.setCurrentPage(page);
   }
 
@@ -800,13 +850,28 @@ export class Viewer {
     return this.numPages;
   }
 
-  private scrollToPage(n: number, ratio: number): void {
+  private scrollToPage(n: number, ratio: number, revealHorizontally = false): void {
     const pv = this.pageViews.get(n);
     if (!pv) return;
     const rect = pv.el.getBoundingClientRect();
     const host = this.scroller.getBoundingClientRect();
     const top = rect.top - host.top + this.scroller.scrollTop + rect.height * clamp(ratio, 0, 0.9) - 12;
-    this.scroller.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+    let left = this.scroller.scrollLeft;
+    if (revealHorizontally) {
+      const right = host.left + this.scroller.clientWidth;
+      if (
+        rect.left < host.left || rect.left >= right ||
+        (rect.width > this.scroller.clientWidth && rect.right > right)
+      ) {
+        left += rect.left - host.left;
+      } else if (rect.right > right) {
+        left += rect.right - right;
+      }
+    }
+    this.scroller.scrollTo({ top: Math.max(0, top), left, behavior: "auto" });
+    // A requested page may share a row or be too close to the end to reach
+    // the scrollport centre. Keep it selected until the reader scrolls.
+    this.navigationTop = this.scroller.scrollTop;
   }
 
   scrollRatio(): number {
@@ -824,8 +889,11 @@ export class Viewer {
     if (this.scrollRaf) return;
     this.scrollRaf = requestAnimationFrame(() => {
       this.scrollRaf = 0;
-      const page = this.pageAtCenter();
-      if (page && page !== this.currentPage) this.setCurrentPage(page);
+      if (this.scroller.scrollTop !== this.navigationTop) {
+        this.navigationTop = null;
+        const page = this.pageAtCenter();
+        if (page && page !== this.currentPage) this.setCurrentPage(page);
+      }
       this.scheduleRender();
     });
   };
@@ -833,17 +901,22 @@ export class Viewer {
   private pageAtCenter(): number {
     if (!this.numPages) return 1;
     const mid = this.scroller.scrollTop + this.scroller.clientHeight / 2;
+    const step = this.pagesPerRow;
     let best = this.currentPage;
     let bestDist = Infinity;
-    for (const pv of this.pageViews.values()) {
-      const top = pv.el.offsetTop;
-      const center = top + pv.el.offsetHeight / 2;
+    let first = 1;
+    for (const el of this.pagesEl.children) {
+      const row = el as HTMLElement;
+      const page = this.currentPage >= first && this.currentPage < first + step ? this.currentPage : first;
+      const top = row.offsetTop;
+      const center = top + row.offsetHeight / 2;
       const dist = Math.abs(center - mid);
       if (dist < bestDist) {
         bestDist = dist;
-        best = pv.num;
+        best = page;
       }
-      if (mid >= top && mid <= top + pv.el.offsetHeight) return pv.num;
+      if (mid >= top && mid <= top + row.offsetHeight) return page;
+      first += step;
     }
     return best;
   }

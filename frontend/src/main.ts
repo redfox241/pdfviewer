@@ -35,6 +35,7 @@ const tabList = $("#doc-tab-list");
 const pageInput = $<HTMLInputElement>("#page-input");
 const pageTotal = $("#page-total");
 const zoomLabel = $("#btn-zoom");
+const btnSpread = $<HTMLButtonElement>("#btn-spread");
 const zoomBadge = $("#zoom-badge");
 const progressFill = $("#progress-fill");
 const appEl = $("#app");
@@ -183,6 +184,15 @@ function updatePrintButton(): void {
   btnPrint.disabled = !activeTab || !activeTab.ready || opening;
 }
 
+function updateSpreadButton(): void {
+  const ready = activeTab?.ready ?? false;
+  const spread = activeTab?.viewer.isTwoPageView() ?? false;
+  btnSpread.disabled = !ready;
+  btnSpread.classList.toggle("active", spread);
+  btnSpread.setAttribute("aria-pressed", String(spread));
+  btnSpread.title = spread ? "切换到单页视图" : "切换到双页视图";
+}
+
 // ---------------------------------------------------------------- events
 
 function handleReady(tab: DocTab, pages: number): void {
@@ -195,6 +205,7 @@ function handleReady(tab: DocTab, pages: number): void {
   updateProgress(tab);
   updateReadButton(tab);
   updatePrintButton();
+  updateSpreadButton();
   if (!sidebar.classList.contains("collapsed")) void refreshSidebar();
   updatePageInput(tab.viewer.getCurrentPage());
   handleZoomChange(tab, tab.viewer.getScale(), tab.viewer.getZoomMode());
@@ -412,6 +423,7 @@ function syncActiveUI(tab: DocTab): void {
   const v = tab.viewer;
   emptyEl.classList.add("hidden");
   updatePrintButton();
+  updateSpreadButton();
   if (!tab.ready) {
     palette.classList.add("hidden");
     pageTotal.textContent = "…";
@@ -446,6 +458,7 @@ function showEmptyState(): void {
   btnRead.classList.remove("active");
   sidebarBody.innerHTML = "";
   updatePrintButton();
+  updateSpreadButton();
   renderTabs();
   void refreshRecent();
 }
@@ -2754,6 +2767,12 @@ function wireUI(): void {
   $("#btn-zoom-in").addEventListener("click", () => activeTab?.viewer.zoomBy(1.2));
   $("#btn-zoom").addEventListener("click", cycleZoomMode);
   $("#btn-fit").addEventListener("click", () => activeTab?.viewer.fitWidth());
+  btnSpread.addEventListener("click", () => {
+    if (!activeTab?.ready) return;
+    const v = activeTab.viewer;
+    v.setTwoPageView(!v.isTwoPageView());
+    updateSpreadButton();
+  });
   $("#btn-rotate").addEventListener("click", () => activeTab?.viewer.rotate(90));
 
   $("#btn-search").addEventListener("click", () => {
