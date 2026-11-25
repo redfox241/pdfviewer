@@ -163,3 +163,38 @@ func TestFingerprintStableForLargeFiles(t *testing.T) {
 		t.Fatal("expected sampled fingerprint to ignore the middle byte")
 	}
 }
+
+func TestReadAdjacentRejectsOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	pdf := writePDF(t, dir)
+	path := AdjacentPath(pdf)
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(MaxSidecar + 1); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadAdjacent(pdf); err == nil {
+		t.Fatal("oversized sidecar was accepted")
+	}
+}
+
+func TestReadAdjacentRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	pdf := writePDF(t, dir)
+	target := filepath.Join(dir, "target.json")
+	if err := os.WriteFile(target, payload(1, 0), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, AdjacentPath(pdf)); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, _, err := ReadAdjacent(pdf); err == nil {
+		t.Fatal("symlinked sidecar was accepted")
+	}
+}

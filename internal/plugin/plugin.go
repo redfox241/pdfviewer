@@ -112,6 +112,10 @@ type Info struct {
 	HasAppID      bool   `json:"hasAppId"`
 	RequiresAppID bool   `json:"requiresAppId"`
 	Size          int64  `json:"size"`
+
+	// Set only on the result of an update whose service identity changed.
+	KeyCleared        bool `json:"keyCleared"`
+	DisabledForReview bool `json:"disabledForReview"`
 }
 
 // Candidate is a validated package waiting for the user to confirm install.
@@ -150,9 +154,10 @@ type Store struct {
 
 // New loads installed plugins from root, creating it if needed.
 func New(root string) (*Store, error) {
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
+	_ = os.Chmod(root, 0o700)
 	s := &Store{
 		root:    root,
 		plugins: make(map[string]*installed),
@@ -564,13 +569,39 @@ func (s *Store) Commit(token string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
+
+	// An update can change where a translator sends data. Never let a new
+	// endpoint inherit credentials that were entered for the old one, and stop
+	// the plugin until the user has reviewed the change.
+	keyCleared := false
+	disabledForReview := false
+	if existing, ok := s.plugins[st.candidate.ID]; ok && manifestIdentityChanged(existing.manifest, m) {
+		keyCleared = oldConfig.APIKey != "" || oldConfig.AppID != ""
+		oldConfig.APIKey = ""
+		oldConfig.AppID = ""
+		oldConfig.Enabled = false
+		oldConfig.Default = false
+		disabledForReview = true
+	}
+
 	p := &installed{manifest: m, config: oldConfig, size: dirSize(target), dir: target}
 	if err := s.writeConfigLocked(p); err != nil {
 		return Info{}, err
 	}
 	s.plugins[m.ID] = p
 	cleanupStaged()
-	return infoOf(p), nil
+	info := infoOf(p)
+	info.KeyCleared = keyCleared
+	info.DisabledForReview = disabledForReview
+	return info, nil
+}
+
+func manifestIdentityChanged(old, next Manifest) bool {
+	return old.Kind != next.Kind ||
+		old.Provider != next.Provider ||
+		old.Endpoint != next.Endpoint ||
+		old.Model != next.Model ||
+		old.Data != next.Data
 }
 
 // Cancel removes a staged package.

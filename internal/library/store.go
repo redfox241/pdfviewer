@@ -35,6 +35,7 @@ func New(dir string) (*Store, error) {
 		}
 		return nil, err
 	}
+	_ = os.Chmod(s.path, 0o600)
 	_ = json.Unmarshal(raw, &s.entries)
 	return s, nil
 }
@@ -121,11 +122,13 @@ func (s *Store) persistLocked() {
 	if err != nil {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return
 	}
+	_ = os.Chmod(filepath.Dir(s.path), 0o700)
 	tmp := s.path + ".tmp"
-	if os.WriteFile(tmp, raw, 0o644) == nil {
+	if os.WriteFile(tmp, raw, 0o600) == nil {
+		_ = os.Chmod(tmp, 0o600)
 		_ = os.Rename(tmp, s.path)
 	}
 }

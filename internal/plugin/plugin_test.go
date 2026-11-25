@@ -628,3 +628,50 @@ func TestCleanHeadwordNormalization(t *testing.T) {
 		t.Fatalf("cleanHeadword = %q", got)
 	}
 }
+
+func TestUpdateEndpointChangeClearsCredentials(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := translatorManifest("https://api.example.com/v1/chat/completions")
+	path := makeZip(t, map[string][]byte{"manifest.json": manifestJSON(t, m)})
+	candidate, err := store.Stage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Commit(candidate.Token); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetKey(m.ID, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetEnabled(m.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	m.Version = "1.1.0"
+	m.Endpoint = "https://api.example.com/v2/chat/completions"
+	path2 := makeZip(t, map[string][]byte{"manifest.json": manifestJSON(t, m)})
+	candidate, err = store.Stage(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := store.Commit(candidate.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.KeyCleared || !info.DisabledForReview {
+		t.Fatalf("update flags = %+v", info)
+	}
+
+	cfg := readConfig(filepath.Join(root, m.ID, configName))
+	if cfg.APIKey != "" || cfg.AppID != "" || cfg.Enabled || cfg.Default {
+		t.Fatalf("config after endpoint change = %+v", cfg)
+	}
+	list := store.List()
+	if len(list) != 1 || list[0].HasKey || list[0].Enabled || list[0].Default {
+		t.Fatalf("list after endpoint change = %+v", list)
+	}
+}

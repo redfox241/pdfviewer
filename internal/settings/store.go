@@ -59,6 +59,7 @@ func New(dir string) (*Store, error) {
 		}
 		return nil, err
 	}
+	_ = os.Chmod(s.path, 0o600)
 	if err := json.Unmarshal(raw, &s.val); err != nil {
 		// Keep defaults, but do not destroy the unreadable file.
 		s.val = Defaults()
@@ -82,17 +83,20 @@ func (s *Store) Set(v Settings) error {
 }
 
 func (s *Store) persist(v Settings) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	_ = os.Chmod(dir, 0o700)
 	raw, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return err
 	}
+	_ = os.Chmod(tmp, 0o600)
 	return os.Rename(tmp, s.path)
 }
 

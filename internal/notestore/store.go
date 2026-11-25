@@ -57,23 +57,26 @@ var schema = []string{
 		PRIMARY KEY (doc_id, page)
 	)`,
 	`CREATE TABLE IF NOT EXISTS annotations (
-		id         TEXT PRIMARY KEY,
+		id         TEXT NOT NULL,
 		doc_id     INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
 		page       INTEGER NOT NULL,
 		type       TEXT NOT NULL,
 		payload    TEXT NOT NULL,
 		created_at TEXT NOT NULL DEFAULT '',
-		updated_at TEXT NOT NULL DEFAULT ''
+		updated_at TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (doc_id, id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_annotations_doc_page ON annotations(doc_id, page)`,
-	`CREATE INDEX IF NOT EXISTS idx_annotations_doc_id ON annotations(doc_id, id)`,
 }
+
+const schemaVersion = 2
 
 // New opens (or creates) library.db inside dir.
 func New(dir string) (*Store, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	_ = os.Chmod(dir, 0o700)
 	return open(filepath.Join(dir, "library.db"))
 }
 
@@ -105,6 +108,11 @@ func open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if path != ":memory:" {
+		for _, p := range []string{path, path + "-wal", path + "-shm"} {
+			_ = os.Chmod(p, 0o600)
+		}
+	}
 	return s, nil
 }
 
@@ -113,20 +121,59 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
+	if version > schemaVersion {
 		return fmt.Errorf("不支持的数据库版本 %d", version)
 	}
-	if version == 0 {
+	switch version {
+	case 0:
 		for _, stmt := range schema {
 			if _, err := s.db.Exec(stmt); err != nil {
 				return err
 			}
 		}
-		if _, err := s.db.Exec("PRAGMA user_version=1"); err != nil {
+		if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 			return err
 		}
+	case 1:
+		return s.migrateAnnotationsV2()
 	}
 	return nil
+}
+
+// migrateAnnotationsV2 scopes annotation ids to their document. Version 1 used
+// a globally unique id, so a sidecar for one document could overwrite or move
+// another document's annotation.
+func (s *Store) migrateAnnotationsV2() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS annotations_v2`,
+		`CREATE TABLE annotations_v2 (
+			id         TEXT NOT NULL,
+			doc_id     INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+			page       INTEGER NOT NULL,
+			type       TEXT NOT NULL,
+			payload    TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (doc_id, id)
+		)`,
+		`INSERT INTO annotations_v2(id, doc_id, page, type, payload, created_at, updated_at)
+		 SELECT id, doc_id, page, type, payload, created_at, updated_at FROM annotations`,
+		`DROP TABLE annotations`,
+		`ALTER TABLE annotations_v2 RENAME TO annotations`,
+		`CREATE INDEX IF NOT EXISTS idx_annotations_doc_page ON annotations(doc_id, page)`,
+		fmt.Sprintf("PRAGMA user_version=%d", schemaVersion),
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("迁移标注表失败: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // Path is the database file location.
@@ -439,8 +486,7 @@ func saveAnnotationsTx(tx *sql.Tx, docID int64, items []json.RawMessage) error {
 		if _, err := tx.Exec(
 			`INSERT INTO annotations(id, doc_id, page, type, payload, created_at, updated_at)
 			 VALUES(?,?,?,?,?,?,?)
-			 ON CONFLICT(id) DO UPDATE SET
-			   doc_id = excluded.doc_id,
+			 ON CONFLICT(doc_id, id) DO UPDATE SET
 			   page = excluded.page,
 			   type = excluded.type,
 			   payload = excluded.payload,

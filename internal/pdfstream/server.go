@@ -43,6 +43,9 @@ func (s *Server) Add(path string) (string, error) {
 	if info.IsDir() {
 		return "", fmt.Errorf("%s is a directory", abs)
 	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", abs)
+	}
 
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
@@ -112,12 +115,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot stat document", http.StatusInternalServerError)
 		return
 	}
+	if !info.Mode().IsRegular() {
+		http.Error(w, "not a regular file", http.StatusForbidden)
+		return
+	}
 
 	h := w.Header()
 	h.Set("Content-Type", "application/pdf")
 	h.Set("Accept-Ranges", "bytes")
 	h.Set("Cache-Control", "no-store")
-	h.Set("Access-Control-Allow-Origin", "*")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Cross-Origin-Resource-Policy", "same-origin")
 
 	// ServeContent handles Range, If-Modified-Since and Content-Disposition.
 	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)

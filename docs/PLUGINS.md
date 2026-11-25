@@ -13,7 +13,7 @@
 - 没有启用插件时，右键菜单仍显示「翻译为中文（未启用插件）」，点击会跳到设置。
 - 卸载会删除插件目录、配置和 API Key。
 
-安装校验：zip 总量上限 2 MB（translation）/ 300 MB（dictionary），最多 4096 个文件；manifest 上限 64 KB；拒绝路径穿越、符号链接和内部保留文件名 `.config.json`；同 id 更新必须版本号不低于已安装版本，并会保留原来的开关和密钥。
+安装校验：zip 总量上限 2 MB（translation）/ 300 MB（dictionary），最多 4096 个文件；manifest 上限 64 KB；拒绝路径穿越、符号链接和内部保留文件名 `.config.json`；同 id 更新必须版本号不低于已安装版本。只有服务标识（kind / provider / endpoint / model / data）未变化时才保留开关和密钥；服务标识变化会清除凭据并停用插件，需重新确认后启用。
 
 ## manifest.json
 

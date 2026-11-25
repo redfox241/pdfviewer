@@ -47,6 +47,7 @@ func New(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	_ = os.Chmod(dir, 0o700)
 	s := &Store{dir: dir, jobs: make(map[string]Job), ttl: tokenTTL}
 	s.Sweep()
 	return s, nil

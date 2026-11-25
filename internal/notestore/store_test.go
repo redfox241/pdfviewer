@@ -1,6 +1,7 @@
 package notestore
 
 import (
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -163,5 +164,96 @@ func TestPath(t *testing.T) {
 	s := newTestStore(t)
 	if filepath.Base(s.Path()) != "library.db" {
 		t.Fatalf("unexpected path: %s", s.Path())
+	}
+}
+
+func TestAnnotationsAreScopedToDocument(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.UpsertDocument("/tmp/a.pdf", "a.pdf", 10, "10:a", 1)
+	b, _ := s.UpsertDocument("/tmp/b.pdf", "b.pdf", 20, "20:b", 1)
+
+	if err := s.SaveAnnotations(a, []json.RawMessage{ann("same", 1)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAnnotations(b, []json.RawMessage{ann("same", 1)}); err != nil {
+		t.Fatal(err)
+	}
+
+	sa, err := s.Load(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err := s.Load(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sa.Annotations) != 1 || len(sb.Annotations) != 1 {
+		t.Fatalf("annotations moved across documents: a=%d b=%d", len(sa.Annotations), len(sb.Annotations))
+	}
+}
+
+func TestMigrateV1Annotations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "library.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE documents (
+			doc_id INTEGER PRIMARY KEY, content_id TEXT NOT NULL UNIQUE, path TEXT NOT NULL,
+			name TEXT NOT NULL, size INTEGER NOT NULL, pages INTEGER NOT NULL DEFAULT 0,
+			last_opened INTEGER NOT NULL)`,
+		`CREATE TABLE reading (
+			doc_id INTEGER PRIMARY KEY REFERENCES documents(doc_id) ON DELETE CASCADE,
+			last_page INTEGER NOT NULL DEFAULT 1, scroll_ratio REAL NOT NULL DEFAULT 0,
+			zoom REAL NOT NULL DEFAULT 0, view_mode TEXT NOT NULL DEFAULT 'continuous',
+			updated_at TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE read_pages (
+			doc_id INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+			page INTEGER NOT NULL, PRIMARY KEY(doc_id, page))`,
+		`CREATE TABLE annotations (
+			id TEXT PRIMARY KEY,
+			doc_id INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+			page INTEGER NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')`,
+		`CREATE INDEX idx_annotations_doc_page ON annotations(doc_id, page)`,
+		`CREATE INDEX idx_annotations_doc_id ON annotations(doc_id, id)`,
+		`INSERT INTO documents(doc_id, content_id, path, name, size, pages, last_opened)
+		 VALUES(1, '10:a', '/tmp/a.pdf', 'a.pdf', 10, 1, 0),
+		       (2, '20:b', '/tmp/b.pdf', 'b.pdf', 20, 1, 0)`,
+		`INSERT INTO annotations(id, doc_id, page, type, payload)
+		 VALUES('same', 1, 1, 'highlight', '{"id":"same","type":"highlight","page":1}')`,
+		`PRAGMA user_version=1`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			db.Close()
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	var version int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, schemaVersion)
+	}
+
+	if err := s.SaveAnnotations(2, []json.RawMessage{ann("same", 1)}); err != nil {
+		t.Fatal(err)
+	}
+	sa, _ := s.Load(1)
+	sb, _ := s.Load(2)
+	if len(sa.Annotations) != 1 || len(sb.Annotations) != 1 {
+		t.Fatalf("annotations not scoped after migration: a=%d b=%d", len(sa.Annotations), len(sb.Annotations))
 	}
 }

@@ -416,7 +416,7 @@ function activateTab(tab: DocTab): void {
   if (!sidebar.classList.contains("collapsed")) void refreshSidebar();
 
   // Debug handle for automated checks during development.
-  if (import.meta.env.DEV || location.protocol === "http:") {
+  if (import.meta.env.DEV) {
     (window as any).__viewer = viewer;
   }
 }
@@ -613,7 +613,7 @@ async function openInfo(info: DocInfo): Promise<void> {
   tab.annotationsSave.seed(tab.viewer.getAnnotations());
   scheduleReadingSave(tab, 600);
 
-  if (import.meta.env.DEV || location.protocol === "http:") {
+  if (import.meta.env.DEV) {
     window.setTimeout(() => {
       void tab.viewer
         .diagnostics()
@@ -1656,12 +1656,25 @@ function pluginRow(p: PluginInfo): HTMLElement {
 
 async function applyPluginUpdate(promise: Promise<PluginInfo[]>): Promise<void> {
   try {
-    plugins = await promise;
+    const next = await promise;
+    plugins = next;
     await refreshPluginSection();
+    reportPluginReview(next);
   } catch (e) {
     toast(`插件操作失败：${errorText(e)}`, "error");
     await refreshPluginSection();
   }
+}
+
+function reportPluginReview(list: PluginInfo[]): void {
+  const changed = list.find((p) => p.keyCleared || p.disabledForReview);
+  if (!changed) return;
+  toast(
+    changed.keyCleared
+      ? "插件服务已变化：原有密钥已清除并停用，请确认后重新配置并启用。"
+      : "插件服务配置已变化，已停用；请确认后重新启用。",
+    "error",
+  );
 }
 
 function clearPluginEditor(): void {
@@ -1862,7 +1875,7 @@ function showInstallConfirm(candidate: InstallCandidate): void {
   title.textContent = `已安装 ${candidate.name}`;
   const hint = document.createElement("div");
   hint.className = "plugin-editor-hint";
-  hint.textContent = `当前 v${candidate.existingVersion}，新包 v${candidate.version}。更新会保留原有开关和 API Key。`;
+  hint.textContent = `当前 v${candidate.existingVersion}，新包 v${candidate.version}。若服务地址或提供方发生变化，更新后会清除原有密钥并停用该插件，确认后才能重新启用。`;
   const actions = document.createElement("div");
   actions.className = "plugin-editor-actions";
   const confirm = document.createElement("button");
@@ -1885,9 +1898,11 @@ function showInstallConfirm(candidate: InstallCandidate): void {
 
 async function commitCandidate(candidate: InstallCandidate): Promise<void> {
   try {
-    plugins = await api.installPlugin(candidate.token);
+    const next = await api.installPlugin(candidate.token);
+    plugins = next;
     pendingInstallToken = null;
     toast(`已安装 ${candidate.name} v${candidate.version}`);
+    reportPluginReview(next);
     clearPluginEditor();
     await refreshPluginSection();
   } catch (e) {

@@ -30,6 +30,23 @@ const SIDE_PAD = 32;
 const SPREAD_GAP = 18;
 const MIN_SCALE = 1 / 3; // 25% of 96 dpi
 const MAX_SCALE = 20 / 3; // 500% of 96 dpi
+const MAX_BASE64_FALLBACK = 256 * 1024 * 1024;
+
+function isBase64FallbackEligible(err: unknown): boolean {
+  const name =
+    typeof err === "object" && err !== null && "name" in err
+      ? String((err as { name?: unknown }).name ?? "")
+      : "";
+  // A password or malformed PDF is not a stream failure. Re-reading the whole
+  // file would only double memory usage and fail again.
+  if (name === "PasswordException" || name === "InvalidPDFException") return false;
+  return (
+    name === "MissingPDFException" ||
+    name === "UnexpectedResponseException" ||
+    name === "UnknownErrorException" ||
+    err instanceof TypeError
+  );
+}
 
 type PdfDoc = any;
 type PdfPage = any;
@@ -219,9 +236,14 @@ export class Viewer {
         cMapUrl: "cmaps/",
         cMapPacked: true,
         standardFontDataUrl: "standard_fonts/",
+        isEvalSupported: false,
+        enableScripting: false,
+        enableXfa: false,
       } as any).promise;
     } catch (err) {
-      // Fallback for environments where the asset route is unavailable.
+      // Fallback for environments where the asset route is unavailable. Do not
+      // turn every PDF parsing error into a full-memory copy of the file.
+      if (!isBase64FallbackEligible(err) || info.size > MAX_BASE64_FALLBACK) throw err;
       const b64 = await (window as any).go?.main?.App?.ReadDocumentBase64?.(info.token);
       if (!b64) throw err;
       const bin = atob(b64 as string);
@@ -232,6 +254,9 @@ export class Viewer {
         cMapUrl: "cmaps/",
         cMapPacked: true,
         standardFontDataUrl: "standard_fonts/",
+        isEvalSupported: false,
+        enableScripting: false,
+        enableXfa: false,
       } as any).promise;
     }
 

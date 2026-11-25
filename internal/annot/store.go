@@ -191,14 +191,7 @@ func ValidateAnnotations(items []json.RawMessage) error {
 
 // ReadAdjacent returns the portable sidecar sitting next to the PDF, if any.
 func ReadAdjacent(pdfPath string) ([]byte, bool, error) {
-	raw, err := os.ReadFile(AdjacentPath(pdfPath))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	return raw, true, nil
+	return readSidecarFile(AdjacentPath(pdfPath))
 }
 
 // ReadLegacyCentral locates the pre-SQLite fallback sidecar for a document.
@@ -211,12 +204,49 @@ func ReadLegacyCentral(pdfPath, fallbackRoot string) ([]byte, bool, error) {
 	}
 	sum := sha256.Sum256([]byte(fp))
 	path := filepath.Join(fallbackRoot, "notes", hex.EncodeToString(sum[:16])+".json")
-	raw, err := os.ReadFile(path)
+	return readSidecarFile(path)
+}
+
+// readSidecarFile reads an untrusted sidecar without following symlinks and
+// without allocating more than MaxSidecar bytes. A FIFO, device or oversized
+// file next to a downloaded PDF must not hang or exhaust the process.
+func readSidecarFile(path string) ([]byte, bool, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
 		}
 		return nil, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, false, fmt.Errorf("sidecar 不能是符号链接")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("sidecar 不是普通文件")
+	}
+	if info.Size() > MaxSidecar {
+		return nil, false, fmt.Errorf("sidecar 超过 %d MB 上限", MaxSidecar>>20)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	// Re-check after opening; Lstat and Open are not atomic.
+	opened, err := f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if !opened.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("sidecar 不是普通文件")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, MaxSidecar+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(raw) > MaxSidecar {
+		return nil, false, fmt.Errorf("sidecar 超过 %d MB 上限", MaxSidecar>>20)
 	}
 	return raw, true, nil
 }

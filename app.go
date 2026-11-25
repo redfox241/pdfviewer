@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +30,10 @@ import (
 )
 
 const appVersion = "1.1.0"
+
+// maxBase64Fallback bounds the compatibility path that loads a whole PDF into
+// memory. The normal stream path has no such limit.
+const maxBase64Fallback = 256 << 20
 
 type App struct {
 	ctx      context.Context
@@ -101,6 +107,8 @@ func NewApp() *App {
 		cfgDir = os.TempDir()
 	}
 	cfgDir = filepath.Join(cfgDir, "PDFViewer")
+	_ = os.MkdirAll(cfgDir, 0o700)
+	_ = os.Chmod(cfgDir, 0o700)
 
 	a := &App{
 		cfgDir:    cfgDir,
@@ -172,18 +180,25 @@ func (a *App) Ping() string {
 }
 
 func (a *App) logf(format string, args ...any) {
-	if err := os.MkdirAll(a.cfgDir, 0o755); err != nil {
+	if err := os.MkdirAll(a.cfgDir, 0o700); err != nil {
 		return
 	}
+	_ = os.Chmod(a.cfgDir, 0o700)
 	logPath := filepath.Join(a.cfgDir, "app.log")
+	// Do not follow a pre-existing symlink: the config dir can fall back to a
+	// shared temp location on unusual systems.
+	if info, err := os.Lstat(logPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		_ = os.Remove(logPath)
+	}
 	if info, err := os.Stat(logPath); err == nil && info.Size() > 1<<20 {
 		_ = os.Truncate(logPath, 0)
 	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}
 	defer f.Close()
+	_ = os.Chmod(logPath, 0o600)
 	fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
 }
 
@@ -265,6 +280,9 @@ func (a *App) OpenDocument(path string) (DocInfo, error) {
 	if info.IsDir() {
 		return DocInfo{}, fmt.Errorf("这是一个文件夹")
 	}
+	if !info.Mode().IsRegular() {
+		return DocInfo{}, fmt.Errorf("不是普通文件")
+	}
 
 	fp, err := annot.Fingerprint(abs)
 	if err != nil {
@@ -282,7 +300,7 @@ func (a *App) OpenDocument(path string) (DocInfo, error) {
 
 	// One-time migration: if this content has no state yet, pull in a
 	// portable sidecar left next to the PDF by an older version.
-	a.importAdjacentIfEmpty(docID, abs, info.Size())
+	a.importAdjacentIfEmpty(docID, abs, info.Size(), fp)
 
 	token, err := a.stream.Add(abs)
 	if err != nil {
@@ -473,6 +491,9 @@ func (a *App) ImportSidecar(token string) (string, error) {
 	if payload.Doc.Size != 0 && payload.Doc.Size != d.Size {
 		return "", fmt.Errorf("该 sidecar 属于其他文档（大小不一致）")
 	}
+	if !sidecarMatchesDocument(payload.Doc, d.Size, d.Fingerprint) {
+		return "", fmt.Errorf("该 sidecar 属于其他文档（内容指纹不一致）")
+	}
 	if err := a.notes.Import(d.DocID, payload); err != nil {
 		return "", err
 	}
@@ -480,7 +501,7 @@ func (a *App) ImportSidecar(token string) (string, error) {
 	return annot.AdjacentPath(d.Path), nil
 }
 
-func (a *App) importAdjacentIfEmpty(docID int64, path string, size int64) {
+func (a *App) importAdjacentIfEmpty(docID int64, path string, size int64, fingerprint string) {
 	source := annot.AdjacentPath(path)
 	raw, ok, err := annot.ReadAdjacent(path)
 	if err != nil {
@@ -508,10 +529,11 @@ func (a *App) importAdjacentIfEmpty(docID int64, path string, size int64) {
 		a.logf("skip unreadable sidecar %q: %v", source, err)
 		return
 	}
-	// Old sidecars carry an mtime-based fingerprint; accept them when the file
-	// size matches. New sidecars match exactly.
-	if payload.Doc.Size != 0 && payload.Doc.Size != size {
-		a.logf("skip sidecar %q: size mismatch", source)
+	// New sidecars carry a content fingerprint and must match exactly. Legacy
+	// sidecars used a size + mtime + head hash fingerprint; accept that shape
+	// only when the size also matches.
+	if !sidecarMatchesDocument(payload.Doc, size, fingerprint) {
+		a.logf("skip sidecar %q: fingerprint mismatch", source)
 		return
 	}
 	if err := a.notes.Import(docID, payload); err != nil {
@@ -521,11 +543,42 @@ func (a *App) importAdjacentIfEmpty(docID int64, path string, size int64) {
 	a.logf("imported sidecar %q", source)
 }
 
+// sidecarMatchesDocument rejects a sidecar from another file while keeping
+// compatibility with the old mtime-based fingerprint.
+func sidecarMatchesDocument(doc annot.Doc, size int64, fingerprint string) bool {
+	if doc.Size != 0 && doc.Size != size {
+		return false
+	}
+	if doc.Fingerprint == "" {
+		return true
+	}
+	if doc.Fingerprint == fingerprint {
+		return true
+	}
+	// Old format: "<size>:<mtime>:<head-hash>".
+	parts := strings.Split(doc.Fingerprint, ":")
+	if len(parts) != 3 || parts[0] != strconv.FormatInt(size, 10) || len(parts[2]) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(parts[2])
+	return err == nil
+}
+
 // ReadDocumentBase64 is a fallback used if streaming is unavailable.
 func (a *App) ReadDocumentBase64(token string) (string, error) {
 	d, err := a.doc(token)
 	if err != nil {
 		return "", err
+	}
+	info, err := os.Stat(d.Path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("不是普通文件")
+	}
+	if info.Size() > maxBase64Fallback {
+		return "", fmt.Errorf("文件过大，无法使用兼容模式读取（上限 %d MB）", maxBase64Fallback>>20)
 	}
 	a.logf("base64 fallback used for %q", d.Path)
 	raw, err := os.ReadFile(d.Path)
@@ -624,10 +677,19 @@ func (a *App) InstallPlugin(token string) ([]plugin.Info, error) {
 	if a.plugins == nil {
 		return []plugin.Info{}, fmt.Errorf("插件目录不可用：%s", a.pluginErr)
 	}
-	if _, err := a.plugins.Commit(token); err != nil {
+	installed, err := a.plugins.Commit(token)
+	if err != nil {
 		return []plugin.Info{}, err
 	}
-	return a.plugins.List(), nil
+	list := a.plugins.List()
+	for i := range list {
+		if list[i].ID == installed.ID {
+			list[i].KeyCleared = installed.KeyCleared
+			list[i].DisabledForReview = installed.DisabledForReview
+			break
+		}
+	}
+	return list, nil
 }
 
 // CancelPluginInstall discards a staged package.
@@ -777,8 +839,10 @@ type PrintOutcome struct {
 	Message string `json:"message"`
 }
 
-// ServeHTTP routes print staging requests and falls back to the PDF stream.
-func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// serveHTTP routes print staging requests and falls back to the PDF stream.
+// It is deliberately unexported so Wails does not expose it as a frontend
+// binding.
+func (a *App) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/print/") {
 		a.servePrint(w, r)
 		return

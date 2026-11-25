@@ -42,7 +42,7 @@ func postStage(app *App, token string, body []byte) *httptest.ResponseRecorder {
 	req.Header.Set("X-Doc-Token", token)
 	req.Header.Set("X-Print-Annotations", "1")
 	rec := httptest.NewRecorder()
-	app.ServeHTTP(rec, req)
+	app.serveHTTP(rec, req)
 	return rec
 }
 
@@ -81,14 +81,14 @@ func TestPrintStageRejectsMissingDocumentAndMethods(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/print/stage", nil)
 	rec = httptest.NewRecorder()
-	app.ServeHTTP(rec, req)
+	app.serveHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET status = %d", rec.Code)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/print/other", nil)
 	rec = httptest.NewRecorder()
-	app.ServeHTTP(rec, req)
+	app.serveHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown path status = %d", rec.Code)
 	}

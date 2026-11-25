@@ -44,6 +44,8 @@ export interface PluginInfo {
   hasAppId: boolean;
   requiresAppId: boolean;
   size: number;
+  keyCleared: boolean;
+  disabledForReview: boolean;
 }
 
 export interface InstallCandidate {

@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"pdfviewer/internal/annot"
@@ -24,7 +26,7 @@ func TestSQLiteStorageAndSidecarMigration(t *testing.T) {
 		Schema: 1,
 		Doc: annot.Doc{
 			Name: "book.pdf", Size: int64(len(pdfBytes)),
-			Fingerprint: "legacy-fingerprint", Pages: 3,
+			Fingerprint: fmt.Sprintf("%d:0:%s", len(pdfBytes), strings.Repeat("a", 64)), Pages: 3,
 		},
 		Reading: annot.Reading{
 			LastPage: 2, ScrollRatio: 0.5, Zoom: 1.25,
@@ -142,5 +144,49 @@ func TestSQLiteStorageAndSidecarMigration(t *testing.T) {
 	// Import reads that portable file back into the database.
 	if _, err := app.ImportSidecar(info.Token); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSidecarMatchesDocument(t *testing.T) {
+	const size = 123
+	const fp = "123:abcdef"
+	cases := []struct {
+		name string
+		doc  annot.Doc
+		want bool
+	}{
+		{"new exact", annot.Doc{Size: size, Fingerprint: fp}, true},
+		{"new mismatch", annot.Doc{Size: size, Fingerprint: "123:other"}, false},
+		{"legacy", annot.Doc{Size: size, Fingerprint: "123:1700000000:" + strings.Repeat("a", 64)}, true},
+		{"legacy wrong size", annot.Doc{Size: size + 1, Fingerprint: "124:1700000000:" + strings.Repeat("a", 64)}, false},
+		{"legacy bad shape", annot.Doc{Size: size, Fingerprint: "123:0:legacy"}, false},
+		{"no fingerprint", annot.Doc{Size: size}, true},
+		{"no metadata", annot.Doc{}, true},
+	}
+	for _, tc := range cases {
+		if got := sidecarMatchesDocument(tc.doc, size, fp); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestReadDocumentBase64RejectsOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.pdf")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxBase64Fallback + 1); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{docs: map[string]docEntry{"tok": {Path: path, Name: "large.pdf"}}}
+	if _, err := app.ReadDocumentBase64("tok"); err == nil {
+		t.Fatal("oversized compatibility read was allowed")
 	}
 }
